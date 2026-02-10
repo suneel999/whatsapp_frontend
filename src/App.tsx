@@ -13,7 +13,7 @@ import {
 } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const API_BASE = 'https://whatsapp.mallikahospitals.com';
+const API_BASE = 'https://whatsapp.mallikahospitals.in';
 
 // Types - Updated to match new API
 interface Stats {
