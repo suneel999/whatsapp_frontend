@@ -3,15 +3,13 @@ import axios from 'axios';
 import {
   Users, Calendar, Activity, MessageSquare, Search, Bell, 
   LayoutDashboard, ChevronRight, RefreshCcw, Send, CheckCircle2,
-  Clock, MapPin, Phone, Mail, Heart, Brain, Stethoscope,
-  TrendingUp, AlertCircle, X, ChevronDown, Filter, Plus,
-  Eye, Edit3, Trash2, UserPlus, CalendarDays, MessageCircle,
-  Building2, ArrowUpRight, ArrowDownRight, MoreVertical,
-  TestTube, Bed, FileText
+  Clock, Phone, Heart, Brain, Stethoscope,
+  AlertCircle, X, Eye, UserPlus, CalendarDays, MessageCircle,
+  Building2, TestTube, Bed
 } from 'lucide-react';
 import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
-  AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell
+  AreaChart, Area, PieChart, Pie, Cell
 } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
 
