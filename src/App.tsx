@@ -58,6 +58,7 @@ interface Appointment {
   date: string;
   time: string;
   status: string;
+  source: string;
   created_at: number;
 }
 
