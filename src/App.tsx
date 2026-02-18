@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import {
   Users, Calendar, Activity, MessageSquare, Search, Bell, 
@@ -102,6 +102,17 @@ interface Interaction {
 // Colors for charts
 const COLORS = ['#0891b2', '#6366f1', '#10b981', '#f59e0b', '#ef4444'];
 
+// Channel/platform display: WhatsApp, Instagram, Facebook
+const PLATFORM_CONFIG: Record<string, { label: string; short: string; className: string; bgClass: string }> = {
+  whatsapp: { label: 'WhatsApp', short: 'WA', className: 'bg-emerald-100 text-emerald-700 border-emerald-200', bgClass: 'bg-emerald-500' },
+  instagram: { label: 'Instagram', short: 'IG', className: 'bg-pink-100 text-pink-700 border-pink-200', bgClass: 'bg-gradient-to-br from-purple-500 to-pink-500' },
+  facebook: { label: 'Facebook', short: 'FB', className: 'bg-blue-100 text-blue-700 border-blue-200', bgClass: 'bg-blue-600' },
+};
+function getPlatformDisplay(platform: string) {
+  const key = (platform || 'whatsapp').toLowerCase();
+  return PLATFORM_CONFIG[key] || PLATFORM_CONFIG.whatsapp;
+}
+
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState('overview');
   const [stats, setStats] = useState<Stats | null>(null);
@@ -117,7 +128,14 @@ const App: React.FC = () => {
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
   const [patientTimeline, setPatientTimeline] = useState<Interaction[]>([]);
   const [appointmentFilter, setAppointmentFilter] = useState('all');
+  const [appointmentSourceFilter, setAppointmentSourceFilter] = useState('all'); // whatsapp, instagram, facebook
+  const [patientPlatformFilter, setPatientPlatformFilter] = useState('all');
   const [showPatientModal, setShowPatientModal] = useState(false);
+  const [whatsappMessageInput, setWhatsappMessageInput] = useState('');
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState(() => new Date());
+  const [calendarSelectedDate, setCalendarSelectedDate] = useState<string | null>(null);
+  const chatMessagesEndRef = useRef<HTMLDivElement>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -125,8 +143,8 @@ const App: React.FC = () => {
         axios.get(`${API_BASE}/api/stats`),
         axios.get(`${API_BASE}/api/analytics/weekly`),
         axios.get(`${API_BASE}/api/live-feed?limit=15`),
-        axios.get(`${API_BASE}/api/patients?search=${searchTerm}&limit=50`),
-        axios.get(`${API_BASE}/api/appointments?status=${appointmentFilter}`),
+        axios.get(`${API_BASE}/api/patients?search=${searchTerm}&limit=50&platform=${patientPlatformFilter}`),
+        axios.get(`${API_BASE}/api/appointments?status=${appointmentFilter}&source=${appointmentSourceFilter}`),
         axios.get(`${API_BASE}/api/diagnostics`),
         axios.get(`${API_BASE}/api/admissions`),
         axios.get(`${API_BASE}/api/appointments/today`)
@@ -145,7 +163,7 @@ const App: React.FC = () => {
       console.error('Error fetching dashboard data:', err);
       setLoading(false);
     }
-  }, [searchTerm, appointmentFilter]);
+  }, [searchTerm, appointmentFilter, appointmentSourceFilter, patientPlatformFilter]);
 
   useEffect(() => {
     fetchData();
@@ -158,11 +176,37 @@ const App: React.FC = () => {
       const res = await axios.get(`${API_BASE}/api/patients/${patient.id}/timeline`);
       setSelectedPatient(patient);
       setPatientTimeline(res.data.interactions || []);
-      setShowPatientModal(true);
+      setShowPatientModal(false);
+      setWhatsappMessageInput('');
     } catch (err) {
       console.error('Error fetching patient details:', err);
     }
   };
+
+  const sendWhatsAppMessage = async () => {
+    if (!selectedPatient || !whatsappMessageInput.trim()) return;
+    setSendingMessage(true);
+    try {
+      await axios.post(`${API_BASE}/api/send-message`, {
+        patient_id: selectedPatient.id,
+        message: whatsappMessageInput.trim()
+      });
+      setWhatsappMessageInput('');
+      const res = await axios.get(`${API_BASE}/api/patients/${selectedPatient.id}/timeline`);
+      setPatientTimeline(res.data.interactions || []);
+    } catch (err) {
+      console.error('Error sending message:', err);
+    } finally {
+      setSendingMessage(false);
+    }
+  };
+
+  // Scroll chat to bottom when conversation or messages change (show latest messages)
+  useEffect(() => {
+    if (selectedPatient && patientTimeline.length > 0) {
+      chatMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [selectedPatient?.id, patientTimeline.length]);
 
   const updateAppointmentStatus = async (bookingId: string, status: string) => {
     try {
@@ -194,6 +238,40 @@ const App: React.FC = () => {
   const formatTime = (timestamp: number) => {
     if (!timestamp) return '--';
     return new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  /** Parse CRM message: show text + options (handles legacy JSON/dict strings). */
+  const parseMessageDisplay = (raw: string): { text: string; options?: string[] } => {
+    if (!raw || typeof raw !== 'string') return { text: raw || '' };
+    const s = raw.trim();
+    if (s.includes('Options: ')) {
+      const idx = s.indexOf('Options: ');
+      return { text: s.slice(0, idx).trim(), options: s.slice(idx + 9).split(', ').map((x) => x.trim()).filter(Boolean) };
+    }
+    if (s.startsWith('{') && (s.includes('text') || s.includes('buttons'))) {
+      try {
+        const jsonStr = s.replace(/'/g, '"').replace(/(\w+):/g, '"$1":');
+        const json = JSON.parse(jsonStr);
+        const text = (json.text || '').trim();
+        const buttons = json.buttons as Array<{ title?: string; id?: string }> | undefined;
+        const options = buttons?.map((b) => (b.title || b.id || '').trim()).filter(Boolean) as string[] | undefined;
+        return { text: text || 'Message sent', options };
+      } catch {
+        const textMatch = s.match(/'text'\s*:\s*["']((?:[^"']|\n)*)["']/);
+        const text = textMatch ? textMatch[1] : s;
+        const titleMatches = s.match(/'title'\s*:\s*["']([^"']*)["']/g) || [];
+        const options = titleMatches.map((x) => x.replace(/'title'\s*:\s*["']([^"']*)["']/, '$1').replace(/^.*["']([^"']+)["']\s*$/, '$1'));
+        return { text: text || s, options: options.length ? options : undefined };
+      }
+    }
+    return { text: s };
+  };
+
+  /** Format message for display: parse dict-like strings, normalize \\n to newlines, return content for pre-line rendering. */
+  const formatMessageForDisplay = (raw: string): { text: string; options?: string[] } => {
+    const parsed = parseMessageDisplay(raw || '');
+    const text = (parsed.text || '').replace(/\\n/g, '\n');
+    return { text, options: parsed.options };
   };
 
   const formatDate = (timestamp: number) => {
@@ -247,6 +325,7 @@ const App: React.FC = () => {
             { id: 'overview', icon: LayoutDashboard, label: 'Dashboard' },
             { id: 'patients', icon: Users, label: 'Patients' },
             { id: 'appointments', icon: Calendar, label: 'Appointments' },
+            { id: 'calendar', icon: CalendarDays, label: 'Calendar' },
             { id: 'diagnostics', icon: TestTube, label: 'Diagnostics' },
             { id: 'admissions', icon: Bed, label: 'Admissions' },
             { id: 'omnichannel', icon: MessageSquare, label: 'Messages' },
@@ -318,7 +397,8 @@ const App: React.FC = () => {
                 {activeTab === 'appointments' && 'Appointment Manager'}
                 {activeTab === 'diagnostics' && 'Diagnostic Bookings'}
                 {activeTab === 'admissions' && 'Admission Requests'}
-                {activeTab === 'omnichannel' && 'WhatsApp Messages'}
+                {activeTab === 'omnichannel' && 'Messages (WhatsApp, Instagram, Facebook)'}
+                {activeTab === 'calendar' && 'Appointments Calendar'}
               </h2>
             </div>
 
@@ -387,6 +467,26 @@ const App: React.FC = () => {
                       </div>
                     ))}
                   </div>
+
+                  {/* Channels breakdown - WhatsApp, Instagram, Facebook */}
+                  {stats?.platforms && Object.keys(stats.platforms).length > 0 && (
+                    <div className="card p-6">
+                      <h3 className="font-bold text-slate-800 mb-4">Patients by Channel</h3>
+                      <div className="flex flex-wrap gap-4">
+                        {['whatsapp', 'instagram', 'facebook'].map((key) => {
+                          const count = stats.platforms[key] || 0;
+                          const cfg = getPlatformDisplay(key);
+                          return (
+                            <div key={key} className="flex items-center gap-3 px-4 py-3 rounded-xl bg-slate-50 border border-slate-100">
+                              <span className={`w-3 h-3 rounded-full ${cfg.bgClass}`} />
+                              <span className="font-semibold text-slate-800">{cfg.label}</span>
+                              <span className="text-2xl font-bold text-slate-800">{count}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Charts Row */}
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -471,13 +571,19 @@ const App: React.FC = () => {
                         <span className="badge badge-info">{todayAppointments.length} appointments</span>
                       </div>
                       <div className="space-y-3 max-h-80 overflow-y-auto custom-scrollbar">
-                        {todayAppointments.length > 0 ? todayAppointments.map((appt) => (
+                        {todayAppointments.length > 0 ? todayAppointments.map((appt) => {
+                          const src = appt.source || 'whatsapp';
+                          const pcfg = getPlatformDisplay(src);
+                          return (
                           <div key={appt.booking_id} className="flex items-center gap-4 p-3 rounded-xl bg-slate-50 hover:bg-slate-100 transition-colors">
-                            <div className="w-12 h-12 rounded-xl bg-cyan-100 text-cyan-600 flex items-center justify-center font-bold">
-                              {appt.time?.split(':')[0] || '--'}
+                            <div className="w-12 h-12 rounded-xl bg-cyan-100 text-cyan-600 flex items-center justify-center font-bold text-sm">
+                              {appt.time?.slice(0, 5) || '--'}
                             </div>
                             <div className="flex-1 min-w-0">
-                              <p className="font-semibold text-slate-800 truncate">{appt.patient_name}</p>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <p className="font-semibold text-slate-800 truncate">{appt.patient_name}</p>
+                                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${pcfg.className}`}>{pcfg.short}</span>
+                              </div>
                               <p className="text-xs text-slate-500 flex items-center gap-2">
                                 {getDeptIcon(appt.department_name)}
                                 {appt.department_name || 'General'} • {appt.doctor || 'Doctor'}
@@ -485,7 +591,8 @@ const App: React.FC = () => {
                             </div>
                             <span className={`badge ${getStatusBadge(appt.status)}`}>{appt.status}</span>
                           </div>
-                        )) : (
+                          );
+                        }) : (
                           <div className="text-center py-8 text-slate-400">
                             <CalendarDays size={40} className="mx-auto mb-2 opacity-50" />
                             <p>No appointments today</p>
@@ -504,20 +611,31 @@ const App: React.FC = () => {
                         </span>
                       </div>
                       <div className="space-y-3 max-h-80 overflow-y-auto custom-scrollbar">
-                        {liveFeed.length > 0 ? liveFeed.map((item, idx) => (
-                          <div key={item.id || idx} className="flex items-start gap-3 p-3 rounded-xl hover:bg-slate-50 transition-colors">
-                            <div className={`p-2 rounded-lg ${item.direction === 'inbound' ? 'bg-cyan-100 text-cyan-600' : 'bg-emerald-100 text-emerald-600'}`}>
-                              {item.direction === 'inbound' ? <MessageCircle size={16} /> : <Send size={16} />}
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center justify-between">
-                                <p className="font-semibold text-slate-800 text-sm">{item.patient_name || 'Patient'}</p>
-                                <span className="text-xs text-slate-400">{formatTime(item.timestamp)}</span>
+                        {liveFeed.length > 0 ? (
+                          liveFeed.map((item, idx) => {
+                            const { text, options } = formatMessageForDisplay(item.message || '');
+                            return (
+                              <div key={item.id || idx} className="flex items-start gap-3 p-3 rounded-xl hover:bg-slate-50 transition-colors">
+                                <div className={`p-2 rounded-lg ${item.direction === 'inbound' ? 'bg-cyan-100 text-cyan-600' : 'bg-emerald-100 text-emerald-600'}`}>
+                                  {item.direction === 'inbound' ? <MessageCircle size={16} /> : <Send size={16} />}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="font-semibold text-slate-800 text-sm truncate">{item.patient_name || 'Patient'}</p>
+                                    <span className={`flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium ${getPlatformDisplay(item.platform || 'whatsapp').className}`}>
+                                      {getPlatformDisplay(item.platform || 'whatsapp').short}
+                                    </span>
+                                    <span className="text-xs text-slate-400 flex-shrink-0">{formatTime(item.timestamp)}</span>
+                                  </div>
+                                  <p className="text-xs text-slate-500 mt-1 whitespace-pre-line break-words line-clamp-3">{text}</p>
+                                  {options && options.length > 0 && (
+                                    <p className="text-xs text-slate-400 mt-0.5">Options: {options.join(', ')}</p>
+                                  )}
+                                </div>
                               </div>
-                              <p className="text-xs text-slate-500 truncate mt-1">{item.message}</p>
-                            </div>
-                          </div>
-                        )) : (
+                            );
+                          })
+                        ) : (
                           <div className="text-center py-8 text-slate-400">
                             <Activity size={40} className="mx-auto mb-2 opacity-50" />
                             <p>No recent activity</p>
@@ -538,13 +656,24 @@ const App: React.FC = () => {
                   exit={{ opacity: 0 }}
                   className="space-y-6"
                 >
-                  {/* Patients Table */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-medium text-slate-500 mr-2">Channel:</span>
+                    {['all', 'whatsapp', 'instagram', 'facebook'].map((p) => (
+                      <button
+                        key={p}
+                        onClick={() => setPatientPlatformFilter(p)}
+                        className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${patientPlatformFilter === p ? 'bg-cyan-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                      >
+                        {p === 'all' ? 'All' : getPlatformDisplay(p).label}
+                      </button>
+                    ))}
+                  </div>
                   <div className="table-container">
                     <table className="w-full">
                       <thead>
                         <tr className="border-b border-slate-100">
                           <th className="table-header text-left">Patient</th>
-                          <th className="table-header text-left">Platform</th>
+                          <th className="table-header text-left">Channel</th>
                           <th className="table-header text-left">Phone</th>
                           <th className="table-header text-left">First Contact</th>
                           <th className="table-header text-left">Last Activity</th>
@@ -553,57 +682,66 @@ const App: React.FC = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        {patients.length > 0 ? patients.map((patient) => (
-                          <tr key={patient.id} className="table-row">
-                            <td className="table-cell">
-                              <div className="flex items-center gap-3">
-                                <div className="avatar bg-cyan-100 text-cyan-600">
-                                  {patient.name?.charAt(0) || 'P'}
+                        {patients.length > 0 ? patients.map((patient) => {
+                          const pcfg = getPlatformDisplay(patient.platform || 'whatsapp');
+                          return (
+                            <tr key={patient.id} className="table-row">
+                              <td className="table-cell">
+                                <div className="flex items-center gap-3">
+                                  <div className="avatar bg-cyan-100 text-cyan-600">
+                                    {patient.name?.charAt(0) || 'P'}
+                                  </div>
+                                  <div>
+                                    <p className="font-semibold text-slate-800">{patient.name || 'Anonymous'}</p>
+                                    <p className="text-xs text-slate-400">#{patient.external_id?.slice(-8)}</p>
+                                  </div>
                                 </div>
-                                <div>
-                                  <p className="font-semibold text-slate-800">{patient.name || 'Anonymous'}</p>
-                                  <p className="text-xs text-slate-400">#{patient.external_id?.slice(-8)}</p>
+                              </td>
+                              <td className="table-cell">
+                                <span className={`inline-flex items-center px-2.5 py-1 rounded-lg border text-xs font-medium ${pcfg.className}`}>
+                                  {pcfg.label}
+                                </span>
+                              </td>
+                              <td className="table-cell text-slate-600">
+                                {patient.phone || patient.external_id || '--'}
+                              </td>
+                              <td className="table-cell text-slate-500">
+                                {patient.first_touch ? formatDate(patient.first_touch) : '--'}
+                              </td>
+                              <td className="table-cell text-slate-500">
+                                {patient.last_touch ? formatDate(patient.last_touch) : '--'}
+                              </td>
+                              <td className="table-cell text-center">
+                                <span className="font-bold text-slate-800">
+                                  {(patient.total_appointments || 0) + (patient.total_diagnostics || 0) + (patient.total_admissions || 0)}
+                                </span>
+                              </td>
+                              <td className="table-cell text-right">
+                                <div className="flex items-center justify-end gap-2">
+                                  <button
+                                    onClick={() => fetchPatientDetail(patient)}
+                                    className="p-2 rounded-lg text-slate-400 hover:text-cyan-600 hover:bg-cyan-50 transition-colors"
+                                    title="View details"
+                                  >
+                                    <Eye size={18} />
+                                  </button>
+                                  <button
+                                    onClick={() => { setActiveTab('omnichannel'); fetchPatientDetail(patient); }}
+                                    className="p-2 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                                    title="Open chat"
+                                  >
+                                    <MessageCircle size={18} />
+                                  </button>
                                 </div>
-                              </div>
-                            </td>
-                            <td className="table-cell">
-                              <span className="badge badge-success">
-                                {patient.platform || 'whatsapp'}
-                              </span>
-                            </td>
-                            <td className="table-cell text-slate-600">
-                              {patient.phone || patient.external_id || '--'}
-                            </td>
-                            <td className="table-cell text-slate-500">
-                              {patient.first_touch ? formatDate(patient.first_touch) : '--'}
-                            </td>
-                            <td className="table-cell text-slate-500">
-                              {patient.last_touch ? formatDate(patient.last_touch) : '--'}
-                            </td>
-                            <td className="table-cell text-center">
-                              <span className="font-bold text-slate-800">
-                                {(patient.total_appointments || 0) + (patient.total_diagnostics || 0) + (patient.total_admissions || 0)}
-                              </span>
-                            </td>
-                            <td className="table-cell text-right">
-                              <div className="flex items-center justify-end gap-2">
-                                <button
-                                  onClick={() => fetchPatientDetail(patient)}
-                                  className="p-2 rounded-lg text-slate-400 hover:text-cyan-600 hover:bg-cyan-50 transition-colors"
-                                >
-                                  <Eye size={18} />
-                                </button>
-                                <button className="p-2 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors">
-                                  <MessageCircle size={18} />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        )) : (
+                              </td>
+                            </tr>
+                          );
+                        }) : (
                           <tr>
                             <td colSpan={7} className="table-cell text-center py-16">
                               <Users size={48} className="mx-auto text-slate-200 mb-4" />
                               <p className="text-slate-400 font-medium">No patients found</p>
+                              <p className="text-xs text-slate-400 mt-1">Try changing the channel filter or search.</p>
                             </td>
                           </tr>
                         )}
@@ -622,9 +760,10 @@ const App: React.FC = () => {
                   exit={{ opacity: 0 }}
                   className="space-y-6"
                 >
-                  {/* Filters */}
-                  <div className="flex items-center justify-between">
+                  {/* Filters: Status + Channel */}
+                  <div className="flex flex-wrap items-center gap-4">
                     <div className="flex gap-2">
+                      <span className="text-sm font-medium text-slate-500 self-center">Status:</span>
                       {['all', 'confirmed', 'completed', 'cancelled'].map((status) => (
                         <button
                           key={status}
@@ -632,6 +771,18 @@ const App: React.FC = () => {
                           className={`btn ${appointmentFilter === status ? 'btn-primary' : 'btn-secondary'}`}
                         >
                           {status.charAt(0).toUpperCase() + status.slice(1)}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="text-sm font-medium text-slate-500 self-center">Channel:</span>
+                      {['all', 'whatsapp', 'instagram', 'facebook'].map((src) => (
+                        <button
+                          key={src}
+                          onClick={() => setAppointmentSourceFilter(src)}
+                          className={`px-3 py-1.5 rounded-lg text-sm font-medium ${appointmentSourceFilter === src ? 'bg-cyan-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                        >
+                          {src === 'all' ? 'All' : getPlatformDisplay(src).label}
                         </button>
                       ))}
                     </div>
@@ -684,6 +835,7 @@ const App: React.FC = () => {
                         <tr className="border-b border-slate-100">
                           <th className="table-header text-left">Booking ID</th>
                           <th className="table-header text-left">Patient</th>
+                          <th className="table-header text-left">Channel</th>
                           <th className="table-header text-left">Phone</th>
                           <th className="table-header text-left">Doctor</th>
                           <th className="table-header text-left">Date & Time</th>
@@ -692,12 +844,18 @@ const App: React.FC = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        {appointments.length > 0 ? appointments.map((appt) => (
+                        {appointments.length > 0 ? appointments.map((appt) => {
+                          const src = appt.source || 'whatsapp';
+                          const pcfg = getPlatformDisplay(src);
+                          return (
                           <tr key={appt.booking_id} className="table-row">
                             <td className="table-cell">
                               <span className="font-mono text-xs bg-slate-100 px-2 py-1 rounded">{appt.booking_id}</span>
                             </td>
                             <td className="table-cell font-semibold text-slate-800">{appt.patient_name}</td>
+                            <td className="table-cell">
+                              <span className={`inline-flex px-2 py-0.5 rounded border text-xs font-medium ${pcfg.className}`}>{pcfg.label}</span>
+                            </td>
                             <td className="table-cell text-slate-600">{appt.phone || '--'}</td>
                             <td className="table-cell text-slate-600">{appt.doctor || '--'}</td>
                             <td className="table-cell">
@@ -732,16 +890,111 @@ const App: React.FC = () => {
                               </div>
                             </td>
                           </tr>
-                        )) : (
+                          );
+                        }) : (
                           <tr>
-                            <td colSpan={7} className="table-cell text-center py-16">
+                            <td colSpan={8} className="table-cell text-center py-16">
                               <Calendar size={48} className="mx-auto text-slate-200 mb-4" />
                               <p className="text-slate-400 font-medium">No appointments found</p>
+                              <p className="text-xs text-slate-400 mt-1">Try changing status or channel filter.</p>
                             </td>
                           </tr>
                         )}
                       </tbody>
                     </table>
+                  </div>
+                </motion.div>
+              )}
+
+              {/* CALENDAR TAB */}
+              {activeTab === 'calendar' && (
+                <motion.div
+                  key="calendar"
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  className="space-y-6"
+                >
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <div className="lg:col-span-2 card p-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="font-bold text-slate-800">
+                          {calendarMonth.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })}
+                        </h3>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1))}
+                            className="btn btn-ghost"
+                          >
+                            Previous
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setCalendarMonth(new Date())}
+                            className="btn btn-secondary"
+                          >
+                            Today
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1))}
+                            className="btn btn-ghost"
+                          >
+                            Next
+                          </button>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-7 gap-1 text-center text-sm">
+                        {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
+                          <div key={d} className="font-semibold text-slate-500 py-1">{d}</div>
+                        ))}
+                        {Array.from({ length: new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1).getDay() }, (_, i) => (
+                          <div key={`pad-${i}`} />
+                        ))}
+                        {Array.from({ length: new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 0).getDate() }, (_, i) => i + 1).map((day) => {
+                          const dateStr = `${calendarMonth.getFullYear()}-${String(calendarMonth.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                          const count = appointments.filter((a) => a.date === dateStr && a.status === 'confirmed').length;
+                          const isSelected = calendarSelectedDate === dateStr;
+                          return (
+                            <button
+                              key={day}
+                              type="button"
+                              onClick={() => setCalendarSelectedDate(dateStr)}
+                              className={`p-2 rounded-lg text-sm transition-colors ${
+                                isSelected ? 'bg-cyan-600 text-white' : count > 0 ? 'bg-cyan-50 text-cyan-700 hover:bg-cyan-100' : 'hover:bg-slate-100 text-slate-700'
+                              }`}
+                            >
+                              {day}
+                              {count > 0 && <span className="block text-[10px] opacity-80">{count}</span>}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="card p-6">
+                      <h3 className="font-bold text-slate-800 mb-4">
+                        {calendarSelectedDate
+                          ? new Date(calendarSelectedDate + 'T12:00:00').toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })
+                          : 'Select a date'}
+                      </h3>
+                      <div className="space-y-2 max-h-[320px] overflow-y-auto">
+                        {calendarSelectedDate
+                          ? appointments
+                              .filter((a) => a.date === calendarSelectedDate)
+                              .map((a) => (
+                                <div key={a.booking_id} className="p-3 rounded-xl bg-slate-50 border border-slate-100">
+                                  <p className="font-semibold text-slate-800">{a.patient_name}</p>
+                                  <p className="text-xs text-slate-500">{a.doctor} • {a.time}</p>
+                                  <span className={`badge mt-1 ${getStatusBadge(a.status)}`}>{a.status}</span>
+                                </div>
+                              ))
+                          : null}
+                        {calendarSelectedDate && appointments.filter((a) => a.date === calendarSelectedDate).length === 0 && (
+                          <p className="text-slate-400 text-sm">No appointments on this day.</p>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </motion.div>
               )}
@@ -1000,25 +1253,30 @@ const App: React.FC = () => {
                   className="grid grid-cols-3 gap-6 h-[calc(100vh-200px)]"
                 >
                   {/* Conversations List */}
-                  <div className="card flex flex-col">
-                    <div className="p-4 border-b border-slate-100">
+                  <div className="card flex flex-col min-h-0">
+                    <div className="flex-shrink-0 p-4 border-b border-slate-100">
                       <h3 className="font-bold text-slate-800">Recent Conversations</h3>
                     </div>
-                    <div className="flex-1 overflow-y-auto custom-scrollbar">
+                    <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
                       {patients.slice(0, 15).map((patient) => (
                         <div
                           key={patient.id}
                           onClick={() => fetchPatientDetail(patient)}
-                          className="p-4 border-b border-slate-50 hover:bg-slate-50 cursor-pointer transition-colors"
+                          className={`p-4 border-b border-slate-50 hover:bg-slate-50 cursor-pointer transition-colors ${selectedPatient?.id === patient.id ? 'bg-cyan-50 border-l-2 border-l-cyan-500' : ''}`}
                         >
                           <div className="flex items-center gap-3">
                             <div className="avatar bg-cyan-100 text-cyan-600 relative">
                               {patient.name?.charAt(0) || 'P'}
-                              <span className="absolute -bottom-1 -right-1 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white"></span>
+                              <span className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${getPlatformDisplay(patient.platform || 'whatsapp').bgClass}`}></span>
                             </div>
                             <div className="flex-1 min-w-0">
                               <p className="font-semibold text-slate-800 truncate">{patient.name || 'Patient'}</p>
-                              <p className="text-xs text-slate-400 truncate">WhatsApp • {patient.external_id?.slice(-8)}</p>
+                              <p className="text-xs text-slate-400 truncate flex items-center gap-1.5">
+                                <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium ${getPlatformDisplay(patient.platform || 'whatsapp').className}`}>
+                                  {getPlatformDisplay(patient.platform || 'whatsapp').short}
+                                </span>
+                                {patient.external_id?.slice(-8)}
+                              </p>
                             </div>
                             <span className="text-xs text-slate-400">{patient.last_touch ? formatTime(patient.last_touch) : ''}</span>
                           </div>
@@ -1027,57 +1285,84 @@ const App: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Chat Area */}
-                  <div className="col-span-2 card flex flex-col">
+                  {/* Chat Area - fixed height so messages scroll inside */}
+                  <div className="col-span-2 card flex flex-col min-h-0">
                     {selectedPatient ? (
                       <>
                         {/* Chat Header */}
-                        <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+                        <div className="flex-shrink-0 p-4 border-b border-slate-100 flex items-center justify-between">
                           <div className="flex items-center gap-3">
                             <div className="avatar bg-cyan-100 text-cyan-600">
                               {selectedPatient.name?.charAt(0) || 'P'}
                             </div>
                             <div>
                               <p className="font-semibold text-slate-800">{selectedPatient.name || 'Patient'}</p>
-                              <p className="text-xs text-emerald-600 flex items-center gap-1">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                                WhatsApp
+                              <p className="text-xs flex items-center gap-1.5">
+                                <span className={`w-1.5 h-1.5 rounded-full ${getPlatformDisplay(selectedPatient.platform || 'whatsapp').bgClass}`}></span>
+                                <span className="font-medium text-slate-600">{getPlatformDisplay(selectedPatient.platform || 'whatsapp').label}</span>
                               </p>
                             </div>
                           </div>
                           <div className="flex gap-2">
-                            <button className="btn btn-ghost"><Phone size={18} /></button>
+                            <button className="btn btn-ghost" title="Call"><Phone size={18} /></button>
                           </div>
                         </div>
 
-                        {/* Messages */}
-                        <div className="flex-1 p-4 overflow-y-auto custom-scrollbar space-y-4">
-                          {patientTimeline.length > 0 ? patientTimeline.slice().reverse().map((msg, idx) => (
-                            <div key={idx} className={`flex ${msg.direction === 'outbound' ? 'justify-end' : 'justify-start'}`}>
-                              <div className={`chat-bubble ${msg.direction}`}>
-                                <p>{msg.message}</p>
-                                <p className={`text-xs mt-2 ${msg.direction === 'outbound' ? 'text-cyan-100' : 'text-slate-400'}`}>
-                                  {formatTime(msg.timestamp)}
-                                </p>
+                        {/* Messages - scrollable, latest at bottom */}
+                        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                          <div className="flex-1 min-h-0 p-4 overflow-y-auto custom-scrollbar space-y-4">
+                            {patientTimeline.length > 0 ? (
+                              <>
+                                {patientTimeline.slice().reverse().map((msg, idx) => {
+                                  const { text, options } = formatMessageForDisplay(msg.message || '');
+                                  return (
+                                    <div key={idx} className={`flex ${msg.direction === 'outbound' ? 'justify-end' : 'justify-start'}`}>
+                                      <div className={`chat-bubble ${msg.direction} max-w-[85%]`}>
+                                        {text && <p className="whitespace-pre-line break-words">{text}</p>}
+                                        {options && options.length > 0 && (
+                                          <div className="mt-2 flex flex-wrap gap-1.5">
+                                            {options.map((opt, i) => (
+                                              <span key={i} className="inline-flex items-center px-2.5 py-1 rounded-lg bg-white/20 text-sm">
+                                                {opt}
+                                              </span>
+                                            ))}
+                                          </div>
+                                        )}
+                                        <p className={`text-xs mt-2 ${msg.direction === 'outbound' ? 'text-cyan-100' : 'text-slate-400'}`}>
+                                          {formatTime(msg.timestamp)}
+                                        </p>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                                <div ref={chatMessagesEndRef} />
+                              </>
+                            ) : (
+                              <div className="text-center py-16 text-slate-400">
+                                <MessageSquare size={48} className="mx-auto mb-4 opacity-50" />
+                                <p>No messages yet</p>
                               </div>
-                            </div>
-                          )) : (
-                            <div className="text-center py-16 text-slate-400">
-                              <MessageSquare size={48} className="mx-auto mb-4 opacity-50" />
-                              <p>No messages yet</p>
-                            </div>
-                          )}
+                            )}
+                          </div>
                         </div>
 
                         {/* Message Input */}
-                        <div className="p-4 border-t border-slate-100">
+                        <div className="flex-shrink-0 p-4 border-t border-slate-100">
                           <div className="flex gap-3">
                             <input
                               type="text"
-                              placeholder="Type a message..."
+                              value={whatsappMessageInput}
+                              onChange={(e) => setWhatsappMessageInput(e.target.value)}
+                              onKeyDown={(e) => e.key === 'Enter' && sendWhatsAppMessage()}
+                              placeholder="Type a message to send..."
                               className="input flex-1"
                             />
-                            <button className="btn btn-primary">
+                            <button
+                              type="button"
+                              onClick={sendWhatsAppMessage}
+                              disabled={sendingMessage || !whatsappMessageInput.trim()}
+                              className="btn btn-primary"
+                            >
                               <Send size={18} />
                             </button>
                           </div>
@@ -1124,7 +1409,12 @@ const App: React.FC = () => {
                   </div>
                   <div>
                     <h2 className="text-xl font-bold text-slate-800">{selectedPatient.name || 'Anonymous Patient'}</h2>
-                    <p className="text-slate-500">{selectedPatient.phone || selectedPatient.external_id} • WhatsApp</p>
+                    <p className="text-slate-500 flex items-center gap-2">
+                      {selectedPatient.phone || selectedPatient.external_id}
+                      <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${getPlatformDisplay(selectedPatient.platform || 'whatsapp').className}`}>
+                        {getPlatformDisplay(selectedPatient.platform || 'whatsapp').label}
+                      </span>
+                    </p>
                   </div>
                 </div>
                 <button
@@ -1157,17 +1447,23 @@ const App: React.FC = () => {
               <div className="p-6 max-h-80 overflow-y-auto custom-scrollbar">
                 <h3 className="font-semibold text-slate-800 mb-4">Recent Activity</h3>
                 <div className="space-y-3">
-                  {patientTimeline.slice(0, 10).map((item, idx) => (
+                  {patientTimeline.slice(0, 10).map((item, idx) => {
+                    const { text, options } = formatMessageForDisplay(item.message || '');
+                    return (
                     <div key={idx} className="flex items-start gap-3 p-3 rounded-xl bg-slate-50">
                       <div className={`p-2 rounded-lg ${item.direction === 'inbound' ? 'bg-cyan-100 text-cyan-600' : 'bg-emerald-100 text-emerald-600'}`}>
                         {item.direction === 'inbound' ? <MessageCircle size={14} /> : <Send size={14} />}
                       </div>
-                      <div className="flex-1">
-                        <p className="text-sm text-slate-700">{item.message}</p>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm text-slate-700 whitespace-pre-line break-words">{text}</p>
+                        {options && options.length > 0 && (
+                          <p className="text-xs text-slate-500 mt-0.5">Options: {options.join(', ')}</p>
+                        )}
                         <p className="text-xs text-slate-400 mt-1">{formatDate(item.timestamp)} at {formatTime(item.timestamp)}</p>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </motion.div>
