@@ -1,19 +1,22 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import {
-  Users, Calendar, Activity, MessageSquare, Search, Bell, 
+  Users, Calendar, Activity, MessageSquare, Search, Bell,
   LayoutDashboard, ChevronRight, RefreshCcw, Send, CheckCircle2,
   Clock, Phone, Heart, Brain, Stethoscope,
   AlertCircle, X, Eye, UserPlus, CalendarDays, MessageCircle,
-  Building2, TestTube, Bed
+  Building2, TestTube, Bed, Lock, Instagram, Facebook, LogOut
 } from 'lucide-react';
 import {
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   AreaChart, Area, PieChart, Pie, Cell
 } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
+import LoginForm from './components/LoginForm';
 
-const API_BASE = 'https://whatsapp.mallikahospitals.in';
+const API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? 'http://localhost:8000'
+  : 'https://whatsapp.mallikahospitals.in';
 
 // Types - Updated to match new API
 interface Stats {
@@ -100,15 +103,51 @@ interface Interaction {
   external_id?: string;
 }
 
+interface AppNotification {
+  id: string;
+  type: 'appointment' | 'diagnostic' | 'admission' | 'interaction';
+  title: string;
+  message: string;
+  timestamp: number;
+  read: boolean;
+  patientName?: string;
+  source?: string;
+}
+
 // Colors for charts
 const COLORS = ['#0891b2', '#6366f1', '#10b981', '#f59e0b', '#ef4444'];
 
 // Channel/platform display: WhatsApp, Instagram, Facebook
-const PLATFORM_CONFIG: Record<string, { label: string; short: string; className: string; bgClass: string }> = {
-  whatsapp: { label: 'WhatsApp', short: 'WA', className: 'bg-emerald-100 text-emerald-700 border-emerald-200', bgClass: 'bg-emerald-500' },
-  instagram: { label: 'Instagram', short: 'IG', className: 'bg-pink-100 text-pink-700 border-pink-200', bgClass: 'bg-gradient-to-br from-purple-500 to-pink-500' },
-  facebook: { label: 'Facebook', short: 'FB', className: 'bg-blue-100 text-blue-700 border-blue-200', bgClass: 'bg-blue-600' },
+const PLATFORM_CONFIG: Record<string, { label: string; short: string; icon: any; color: string; className: string; bgClass: string; badgeClass: string }> = {
+  whatsapp: {
+    label: 'WhatsApp',
+    short: 'WA',
+    icon: MessageCircle,
+    color: '#10b981',
+    className: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+    bgClass: 'bg-emerald-500',
+    badgeClass: 'glass-badge-wa'
+  },
+  instagram: {
+    label: 'Instagram',
+    short: 'IG',
+    icon: Instagram,
+    color: '#d946ef',
+    className: 'bg-pink-100 text-pink-700 border-pink-200',
+    bgClass: 'bg-gradient-to-br from-purple-500 to-pink-500',
+    badgeClass: 'glass-badge-ig'
+  },
+  facebook: {
+    label: 'Facebook',
+    short: 'FB',
+    icon: Facebook,
+    color: '#3b82f6',
+    className: 'bg-blue-100 text-blue-700 border-blue-200',
+    bgClass: 'bg-blue-600',
+    badgeClass: 'glass-badge-fb'
+  },
 };
+
 function getPlatformDisplay(platform: string) {
   const key = (platform || 'whatsapp').toLowerCase();
   return PLATFORM_CONFIG[key] || PLATFORM_CONFIG.whatsapp;
@@ -136,7 +175,88 @@ const App: React.FC = () => {
   const [sendingMessage, setSendingMessage] = useState(false);
   const [calendarMonth, setCalendarMonth] = useState(() => new Date());
   const [calendarSelectedDate, setCalendarSelectedDate] = useState<string | null>(null);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [toasts, setToasts] = useState<AppNotification[]>([]);
+
+  // Storage for last processed IDs to avoid duplicate notifications
+  const lastProcessedIds = useRef({
+    appointments: new Set<string>(),
+    diagnostics: new Set<string>(),
+    admissions: new Set<string>(),
+    interactions: 0 // Using ID for interactions
+  });
+
   const chatMessagesEndRef = useRef<HTMLDivElement>(null);
+
+  // AUTH STATE
+  const [token, setToken] = useState<string | null>(() => localStorage.getItem('crm_token'));
+  const [user, setUser] = useState<any | null>(() => {
+    const saved = localStorage.getItem('crm_user');
+    return saved ? JSON.parse(saved) : null;
+  });
+
+  // AXIOS INTERCEPTOR FOR AUTH
+  useEffect(() => {
+    const interceptor = axios.interceptors.request.use((config) => {
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+      }
+      return config;
+    });
+
+    // Response interceptor to handle 401
+    const resInterceptor = axios.interceptors.response.use(
+      (response) => response,
+      (error) => {
+        if (error.response?.status === 401) {
+          handleLogout();
+        }
+        return Promise.reject(error);
+      }
+    );
+
+    return () => {
+      axios.interceptors.request.eject(interceptor);
+      axios.interceptors.response.eject(resInterceptor);
+    };
+  }, [token]);
+
+  const onLoginSuccess = (newToken: string, newUser: any) => {
+    setToken(newToken);
+    setUser(newUser);
+    localStorage.setItem('crm_token', newToken);
+    localStorage.setItem('crm_user', JSON.stringify(newUser));
+  };
+
+  const addNotification = useCallback((notif: Omit<AppNotification, 'id' | 'timestamp' | 'read'>) => {
+    const newNotif: AppNotification = {
+      ...notif,
+      id: Math.random().toString(36).substr(2, 9),
+      timestamp: Date.now() / 1000,
+      read: false
+    };
+    setNotifications(prev => [newNotif, ...prev].slice(0, 50));
+    setToasts(prev => [...prev, newNotif]);
+
+    // Auto-remove toast after 6 seconds
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== newNotif.id));
+    }, 6000);
+  }, []);
+
+  const handleLogout = async () => {
+    try {
+      await axios.post(`${API_BASE}/api/auth/logout`);
+    } catch (e) {
+      console.error('Logout error:', e);
+    } finally {
+      setToken(null);
+      setUser(null);
+      localStorage.removeItem('crm_token');
+      localStorage.removeItem('crm_user');
+    }
+  };
 
   const fetchData = useCallback(async () => {
     try {
@@ -150,7 +270,7 @@ const App: React.FC = () => {
         axios.get(`${API_BASE}/api/admissions`),
         axios.get(`${API_BASE}/api/appointments/today`)
       ]);
-      
+
       setStats(statsRes.data);
       setWeeklyData(weeklyRes.data);
       setLiveFeed(feedRes.data);
@@ -159,18 +279,77 @@ const App: React.FC = () => {
       setDiagnostics(diagnosticsRes.data);
       setAdmissions(admissionsRes.data);
       setTodayAppointments(todayRes.data);
+
+      // --- NOTIFICATION DETECTION LOGIC ---
+      if (!loading) {
+        const newAppointments = appointmentsRes.data as Appointment[];
+        const newDiagnostics = diagnosticsRes.data as Diagnostic[];
+        const newAdmissions = admissionsRes.data as Admission[];
+
+        // Initial tracking setup
+        if (lastProcessedIds.current.appointments.size === 0) {
+          newAppointments.forEach(a => lastProcessedIds.current.appointments.add(a.booking_id));
+          newDiagnostics.forEach(d => lastProcessedIds.current.diagnostics.add(d.booking_id));
+          newAdmissions.forEach(a => lastProcessedIds.current.admissions.add(a.admission_id));
+        } else {
+          // Check for new appointments
+          newAppointments.forEach(a => {
+            if (!lastProcessedIds.current.appointments.has(a.booking_id)) {
+              lastProcessedIds.current.appointments.add(a.booking_id);
+              addNotification({
+                type: 'appointment',
+                title: 'New Appointment',
+                message: `${a.patient_name} booked for ${a.doctor} at ${a.time}`,
+                patientName: a.patient_name,
+                source: a.source
+              });
+            }
+          });
+
+          // Check for new diagnostics
+          newDiagnostics.forEach(d => {
+            if (!lastProcessedIds.current.diagnostics.has(d.booking_id)) {
+              lastProcessedIds.current.diagnostics.add(d.booking_id);
+              addNotification({
+                type: 'diagnostic',
+                title: 'New Diagnostic Booking',
+                message: `${d.patient_name} requested a ${d.test_type}`,
+                patientName: d.patient_name,
+                source: 'whatsapp'
+              });
+            }
+          });
+
+          // Check for new admissions
+          newAdmissions.forEach(a => {
+            if (!lastProcessedIds.current.admissions.has(a.admission_id)) {
+              lastProcessedIds.current.admissions.add(a.admission_id);
+              addNotification({
+                type: 'admission',
+                title: 'New Admission Request',
+                message: `${a.patient_name} (${a.admission_type})`,
+                patientName: a.patient_name,
+                source: 'whatsapp'
+              });
+            }
+          });
+        }
+      }
+
       setLoading(false);
     } catch (err) {
       console.error('Error fetching dashboard data:', err);
       setLoading(false);
     }
-  }, [searchTerm, appointmentFilter, appointmentSourceFilter, patientPlatformFilter]);
+  }, [searchTerm, appointmentFilter, appointmentSourceFilter, patientPlatformFilter, loading, addNotification]);
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 15000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+    if (token) {
+      fetchData();
+      const interval = setInterval(fetchData, 15000);
+      return () => clearInterval(interval);
+    }
+  }, [fetchData, token]);
 
   const fetchPatientDetail = async (patient: Patient) => {
     try {
@@ -241,6 +420,17 @@ const App: React.FC = () => {
     return new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
+  const formatDate = (timestamp: number) => {
+    if (!timestamp) return '--';
+    return new Date(timestamp * 1000).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  };
+
+  const markAllAsRead = () => {
+    setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+  };
+
+  const unreadCount = notifications.filter(n => !n.read).length;
+
   /** Parse CRM message: show text + options (handles legacy JSON/dict strings). */
   const parseMessageDisplay = (raw: string): { text: string; options?: string[] } => {
     if (!raw || typeof raw !== 'string') return { text: raw || '' };
@@ -275,22 +465,18 @@ const App: React.FC = () => {
     return { text, options: parsed.options };
   };
 
-  const formatDate = (timestamp: number) => {
-    if (!timestamp) return '--';
-    return new Date(timestamp * 1000).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  };
-
   const getStatusBadge = (status: string) => {
+    const s = (status || '').toLowerCase();
     const badges: Record<string, string> = {
-      confirmed: 'badge-success',
-      completed: 'badge-info',
-      cancelled: 'badge-danger',
-      'no-show': 'badge-warning',
-      pending: 'badge-warning',
-      admitted: 'badge-info',
-      discharged: 'badge-default'
+      confirmed: 'glass-badge-success',
+      completed: 'glass-badge-info',
+      cancelled: 'glass-badge-danger',
+      'no-show': 'glass-badge-warning',
+      pending: 'glass-badge-warning',
+      admitted: 'glass-badge-info',
+      discharged: 'glass-badge-default'
     };
-    return badges[status] || 'badge-default';
+    return `glass-badge ${badges[s] || 'glass-badge-default'}`;
   };
 
   const getDeptIcon = (dept: string) => {
@@ -302,6 +488,10 @@ const App: React.FC = () => {
 
   // Prepare pie chart data
   const pieData = stats ? Object.entries(stats.departments || {}).map(([name, value]) => ({ name, value })) : [];
+
+  if (!token) {
+    return <LoginForm onLoginSuccess={onLoginSuccess} apiBase={API_BASE} />;
+  }
 
   return (
     <div className="flex min-h-screen bg-slate-50">
@@ -334,11 +524,10 @@ const App: React.FC = () => {
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
-              className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-xl transition-all ${
-                activeTab === item.id
-                  ? 'bg-white text-cyan-700 shadow-lg shadow-black/10 font-semibold'
-                  : 'text-white/80 hover:bg-white/10'
-              }`}
+              className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-xl transition-all ${activeTab === item.id
+                ? 'bg-white text-cyan-700 shadow-lg shadow-black/10 font-semibold'
+                : 'text-white/80 hover:bg-white/10'
+                }`}
             >
               <item.icon size={20} />
               <span>{item.label}</span>
@@ -347,38 +536,25 @@ const App: React.FC = () => {
           ))}
         </nav>
 
-        {/* Quick Stats */}
-        <div className="p-4 border-t border-white/10">
-          <div className="bg-white/10 rounded-2xl p-4 backdrop-blur">
-            <p className="text-xs text-cyan-100 font-semibold uppercase tracking-wider mb-3">Today's Summary</p>
-            <div className="space-y-2">
-              <div className="flex justify-between items-center">
-                <span className="text-sm text-white/70">Appointments</span>
-                <span className="font-bold">{stats?.today_appointments || 0}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-sm text-white/70">Diagnostics</span>
-                <span className="font-bold">{stats?.today_diagnostics || 0}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-sm text-white/70">Pending Admissions</span>
-                <span className="font-bold">{stats?.pending_admissions || 0}</span>
-              </div>
-            </div>
-          </div>
-        </div>
 
         {/* User Profile */}
         <div className="p-4 border-t border-white/10">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 mb-4">
             <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center font-bold">
-              MB
+              {user?.full_name?.charAt(0) || 'U'}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="font-semibold truncate">Dr. Mahesh Babu</p>
-              <p className="text-xs text-cyan-100">Administrator</p>
+              <p className="font-semibold truncate">{user?.full_name || user?.username || 'User'}</p>
+              <p className="text-xs text-cyan-100 opacity-70 uppercase tracking-tighter">{user?.role || 'Staff'}</p>
             </div>
           </div>
+          <button
+            onClick={handleLogout}
+            className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-white/60 hover:text-white hover:bg-white/10 transition-all font-medium text-sm border border-transparent hover:border-white/10"
+          >
+            <Lock size={16} />
+            <span>Sign Out</span>
+          </button>
         </div>
       </aside>
 
@@ -414,16 +590,100 @@ const App: React.FC = () => {
                   className="input pl-10 w-72"
                 />
               </div>
-              <button className="btn btn-ghost relative">
-                <Bell size={20} />
-                {(stats?.pending_admissions || 0) > 0 && (
-                  <span className="absolute -top-1 -right-1 w-4 h-4 bg-rose-500 rounded-full text-[10px] text-white font-bold flex items-center justify-center">
-                    {stats?.pending_admissions}
-                  </span>
-                )}
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setShowNotifications(!showNotifications)}
+                  className={`btn btn-ghost relative ${showNotifications ? 'bg-slate-100' : ''}`}
+                >
+                  <Bell size={20} className={unreadCount > 0 ? 'text-cyan-600' : 'text-slate-600'} />
+                  {unreadCount > 0 && (
+                    <span className="absolute -top-1 -right-1 w-5 h-5 bg-rose-500 rounded-full text-[10px] text-white font-bold flex items-center justify-center border-2 border-white animate-bounce-slow">
+                      {unreadCount}
+                    </span>
+                  )}
+                </button>
+
+                {/* Notifications Dropdown */}
+                <AnimatePresence>
+                  {showNotifications && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-40"
+                        onClick={() => setShowNotifications(false)}
+                      />
+                      <motion.div
+                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                        className="absolute right-0 mt-2 w-80 bg-white rounded-2xl shadow-2xl border border-slate-100 z-50 overflow-hidden"
+                      >
+                        <div className="p-4 border-b border-slate-50 flex items-center justify-between bg-slate-50/50">
+                          <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                            Notifications
+                            {unreadCount > 0 && <span className="bg-cyan-100 text-cyan-700 text-[10px] px-2 py-0.5 rounded-full uppercase">{unreadCount} New</span>}
+                          </h3>
+                          <button
+                            onClick={markAllAsRead}
+                            className="text-[10px] font-bold text-cyan-600 uppercase hover:underline"
+                          >
+                            Mark all read
+                          </button>
+                        </div>
+                        <div className="max-h-[400px] overflow-y-auto">
+                          {notifications.length > 0 ? (
+                            notifications.map(n => (
+                              <div
+                                key={n.id}
+                                className={`p-4 border-b border-slate-50 last:border-0 hover:bg-slate-50 transition-colors cursor-pointer ${!n.read ? 'bg-cyan-50/30' : ''}`}
+                                onClick={() => {
+                                  setNotifications(prev => prev.map(notif => notif.id === n.id ? { ...notif, read: true } : notif));
+                                  if (n.type === 'appointment') setActiveTab('appointments');
+                                  if (n.type === 'diagnostic') setActiveTab('diagnostics');
+                                  if (n.type === 'admission') setActiveTab('admissions');
+                                  setShowNotifications(false);
+                                }}
+                              >
+                                <div className="flex gap-3">
+                                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${n.type === 'appointment' ? 'bg-cyan-100 text-cyan-600' :
+                                    n.type === 'diagnostic' ? 'bg-emerald-100 text-emerald-600' :
+                                      'bg-amber-100 text-amber-600'
+                                    }`}>
+                                    {n.type === 'appointment' && <Calendar size={18} />}
+                                    {n.type === 'diagnostic' && <TestTube size={18} />}
+                                    {n.type === 'admission' && <Bed size={18} />}
+                                  </div>
+                                  <div className="min-w-0">
+                                    <p className="text-sm font-bold text-slate-800 truncate">{n.title}</p>
+                                    <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{n.message}</p>
+                                    <p className="text-[10px] text-slate-400 mt-2 font-medium flex items-center gap-1">
+                                      <Clock size={10} /> {formatTime(n.timestamp)} • {n.source || 'WhatsApp'}
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="p-8 text-center text-slate-400">
+                              <Bell size={32} className="mx-auto mb-2 opacity-20" />
+                              <p className="text-sm font-medium">No notifications yet</p>
+                            </div>
+                          )}
+                        </div>
+                        <div className="p-3 bg-slate-50/50 text-center border-t border-slate-50">
+                          <button className="text-[10px] font-bold text-slate-400 uppercase tracking-widest hover:text-slate-600">
+                            Viewing Recent Activity
+                          </button>
+                        </div>
+                      </motion.div>
+                    </>
+                  )}
+                </AnimatePresence>
+              </div>
               <button onClick={fetchData} className="btn btn-secondary">
                 <RefreshCcw size={16} /> Refresh
+              </button>
+              <button onClick={handleLogout} className="btn bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white border-transparent flex items-center gap-2 ml-2 transition-all">
+                <LogOut size={16} /> Logout
               </button>
             </div>
           </div>
@@ -505,12 +765,12 @@ const App: React.FC = () => {
                           <AreaChart data={weeklyData}>
                             <defs>
                               <linearGradient id="colorAppt" x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="5%" stopColor="#0891b2" stopOpacity={0.3}/>
-                                <stop offset="95%" stopColor="#0891b2" stopOpacity={0}/>
+                                <stop offset="5%" stopColor="#0891b2" stopOpacity={0.3} />
+                                <stop offset="95%" stopColor="#0891b2" stopOpacity={0} />
                               </linearGradient>
                               <linearGradient id="colorPatients" x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3}/>
-                                <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                                <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
+                                <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
                               </linearGradient>
                             </defs>
                             <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
@@ -576,22 +836,22 @@ const App: React.FC = () => {
                           const src = appt.source || 'whatsapp';
                           const pcfg = getPlatformDisplay(src);
                           return (
-                          <div key={appt.booking_id} className="flex items-center gap-4 p-3 rounded-xl bg-slate-50 hover:bg-slate-100 transition-colors">
-                            <div className="w-12 h-12 rounded-xl bg-cyan-100 text-cyan-600 flex items-center justify-center font-bold text-sm">
-                              {appt.time?.slice(0, 5) || '--'}
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <p className="font-semibold text-slate-800 truncate">{appt.patient_name}</p>
-                                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${pcfg.className}`}>{pcfg.short}</span>
+                            <div key={appt.booking_id} className="flex items-center gap-4 p-3 rounded-xl bg-slate-50 hover:bg-slate-100 transition-colors">
+                              <div className="w-12 h-12 rounded-xl bg-cyan-100 text-cyan-600 flex items-center justify-center font-bold text-sm">
+                                {appt.time?.slice(0, 5) || '--'}
                               </div>
-                              <p className="text-xs text-slate-500 flex items-center gap-2">
-                                {getDeptIcon(appt.department_name)}
-                                {appt.department_name || 'General'} • {appt.doctor || 'Doctor'}
-                              </p>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <p className="font-semibold text-slate-800 truncate">{appt.patient_name}</p>
+                                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${pcfg.className}`}>{pcfg.short}</span>
+                                </div>
+                                <p className="text-xs text-slate-500 flex items-center gap-2">
+                                  {getDeptIcon(appt.department_name)}
+                                  {appt.department_name || 'General'} • {appt.doctor || 'Doctor'}
+                                </p>
+                              </div>
+                              <span className={`badge ${getStatusBadge(appt.status)}`}>{appt.status}</span>
                             </div>
-                            <span className={`badge ${getStatusBadge(appt.status)}`}>{appt.status}</span>
-                          </div>
                           );
                         }) : (
                           <div className="text-center py-8 text-slate-400">
@@ -611,35 +871,66 @@ const App: React.FC = () => {
                           Real-time
                         </span>
                       </div>
-                      <div className="space-y-3 max-h-80 overflow-y-auto custom-scrollbar">
+                      <div className="space-y-4 max-h-96 overflow-y-auto custom-scrollbar pr-2">
                         {liveFeed.length > 0 ? (
                           liveFeed.map((item, idx) => {
                             const { text, options } = formatMessageForDisplay(item.message || '');
+                            const pcfg = getPlatformDisplay(item.platform || 'whatsapp');
+                            const PlatformIcon = pcfg.icon;
+
                             return (
-                              <div key={item.id || idx} className="flex items-start gap-3 p-3 rounded-xl hover:bg-slate-50 transition-colors">
-                                <div className={`p-2 rounded-lg ${item.direction === 'inbound' ? 'bg-cyan-100 text-cyan-600' : 'bg-emerald-100 text-emerald-600'}`}>
-                                  {item.direction === 'inbound' ? <MessageCircle size={16} /> : <Send size={16} />}
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <p className="font-semibold text-slate-800 text-sm truncate">{item.patient_name || 'Patient'}</p>
-                                    <span className={`flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium ${getPlatformDisplay(item.platform || 'whatsapp').className}`}>
-                                      {getPlatformDisplay(item.platform || 'whatsapp').short}
-                                    </span>
-                                    <span className="text-xs text-slate-400 flex-shrink-0">{formatTime(item.timestamp)}</span>
+                              <div key={item.id || idx} className="glass p-4 rounded-2xl hover:bg-white transition-all group border-slate-100/50">
+                                <div className="flex items-center justify-between mb-3">
+                                  <div className="flex items-center gap-2">
+                                    <div className={`p-1.5 rounded-lg ${pcfg.bgClass} text-white shadow-sm`}>
+                                      <PlatformIcon size={12} />
+                                    </div>
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{pcfg.label}</span>
                                   </div>
-                                  <p className="text-xs text-slate-500 mt-1 whitespace-pre-line break-words line-clamp-3">{text}</p>
-                                  {options && options.length > 0 && (
-                                    <p className="text-xs text-slate-400 mt-0.5">Options: {options.join(', ')}</p>
-                                  )}
+                                  <span className="text-[10px] font-bold text-slate-400 bg-slate-50 px-2 py-0.5 rounded-full uppercase">{formatTime(item.timestamp)}</span>
+                                </div>
+                                <div className="flex items-start gap-3">
+                                  <div className={`p-2.5 rounded-xl ${item.direction === 'inbound' ? 'bg-cyan-50 text-cyan-600' : 'bg-emerald-50 text-emerald-600'}`}>
+                                    {item.direction === 'inbound' ? <MessageCircle size={18} /> : <Send size={18} />}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="font-bold text-slate-800 text-sm truncate">{item.patient_name || 'Patient'}</p>
+                                    <p className="text-xs text-slate-500 mt-1 leading-relaxed bg-slate-50/50 p-2 rounded-lg border border-slate-100/50 whitespace-pre-line break-words line-clamp-3 italic">"{text}"</p>
+                                    {options && options.length > 0 && (
+                                      <div className="flex flex-wrap gap-1 mt-2">
+                                        {options.map((opt, i) => (
+                                          <span key={i} className="text-[10px] font-bold bg-white text-slate-500 border border-slate-100 px-2 py-0.5 rounded-md uppercase tracking-tighter">{opt}</span>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="mt-3 pt-3 border-t border-slate-50 flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <button
+                                    onClick={() => {
+                                      setActiveTab('omnichannel');
+                                      // Find corresponding patient object or create placeholder for type safety
+                                      const p = patients.find(pat => pat.external_id === item.external_id) || {
+                                        id: 0,
+                                        external_id: item.external_id || '',
+                                        name: item.patient_name || 'Patient',
+                                        platform: item.platform || 'whatsapp'
+                                      } as Patient;
+                                      fetchPatientDetail(p);
+                                    }}
+                                    className="text-[10px] font-bold text-cyan-600 uppercase hover:underline flex items-center gap-1"
+                                  >
+                                    Review & Reply <ChevronRight size={10} />
+                                  </button>
                                 </div>
                               </div>
                             );
                           })
                         ) : (
-                          <div className="text-center py-8 text-slate-400">
-                            <Activity size={40} className="mx-auto mb-2 opacity-50" />
-                            <p>No recent activity</p>
+                          <div className="text-center py-12 text-slate-400">
+                            <Activity size={48} className="mx-auto mb-3 opacity-20" />
+                            <p className="font-bold text-slate-500">Waiting for activity...</p>
+                            <p className="text-xs mt-1">Real-time messages will appear here.</p>
                           </div>
                         )}
                       </div>
@@ -669,69 +960,87 @@ const App: React.FC = () => {
                       </button>
                     ))}
                   </div>
-                  <div className="table-container">
-                    <table className="w-full">
+                  <div className="table-container shadow-2xl shadow-slate-200/50">
+                    <table className="w-full text-left">
                       <thead>
-                        <tr className="border-b border-slate-100">
-                          <th className="table-header text-left">Patient</th>
-                          <th className="table-header text-left">Channel</th>
-                          <th className="table-header text-left">Phone</th>
-                          <th className="table-header text-left">First Contact</th>
-                          <th className="table-header text-left">Last Activity</th>
-                          <th className="table-header text-center">Bookings</th>
-                          <th className="table-header text-right">Actions</th>
+                        <tr className="border-b border-slate-100/50">
+                          <th className="table-header py-5">Patient Identity</th>
+                          <th className="table-header">Primary Channel</th>
+                          <th className="table-header">Contact & ID</th>
+                          <th className="table-header">Lifecycle</th>
+                          <th className="table-header text-center">Total Bookings</th>
+                          <th className="table-header text-right pr-8">Actions</th>
                         </tr>
                       </thead>
                       <tbody>
                         {patients.length > 0 ? patients.map((patient) => {
                           const pcfg = getPlatformDisplay(patient.platform || 'whatsapp');
+                          const PlatformIcon = pcfg.icon;
+
                           return (
-                            <tr key={patient.id} className="table-row">
-                              <td className="table-cell">
+                            <tr key={patient.id} className="premium-table-row group">
+                              <td className="table-cell py-5">
                                 <div className="flex items-center gap-3">
-                                  <div className="avatar bg-cyan-100 text-cyan-600">
+                                  <div className={`avatar ${pcfg.bgClass} text-white shadow-lg shadow-black/10 transition-transform group-hover:scale-110`}>
                                     {patient.name?.charAt(0) || 'P'}
                                   </div>
                                   <div>
-                                    <p className="font-semibold text-slate-800">{patient.name || 'Anonymous'}</p>
-                                    <p className="text-xs text-slate-400">#{patient.external_id?.slice(-8)}</p>
+                                    <p className="font-bold text-slate-800 text-base">
+                                      {patient.name && patient.name.toLowerCase() !== 'anonymous'
+                                        ? patient.name
+                                        : (patient.phone || patient.external_id || 'Unknown Patient')}
+                                    </p>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">Verified Profile</p>
                                   </div>
                                 </div>
                               </td>
                               <td className="table-cell">
-                                <span className={`inline-flex items-center px-2.5 py-1 rounded-lg border text-xs font-medium ${pcfg.className}`}>
-                                  {pcfg.label}
-                                </span>
+                                <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full border shadow-sm ${pcfg.badgeClass}`}>
+                                  <PlatformIcon size={14} style={{ color: pcfg.color }} />
+                                  <span className="text-xs font-bold uppercase tracking-wide">{pcfg.label}</span>
+                                </div>
                               </td>
-                              <td className="table-cell text-slate-600">
-                                {patient.phone || patient.external_id || '--'}
+                              <td className="table-cell">
+                                <div className="space-y-1">
+                                  <p className="text-sm font-bold text-slate-700">{patient.phone || '--'}</p>
+                                  <p className="text-[10px] font-mono text-slate-400 uppercase tracking-tighter">ID: {patient.external_id?.slice(-12)}</p>
+                                </div>
                               </td>
-                              <td className="table-cell text-slate-500">
-                                {patient.first_touch ? formatDate(patient.first_touch) : '--'}
-                              </td>
-                              <td className="table-cell text-slate-500">
-                                {patient.last_touch ? formatDate(patient.last_touch) : '--'}
+                              <td className="table-cell">
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-emerald-400"></div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Joined: {patient.first_touch ? formatDate(patient.first_touch) : '--'}</p>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-cyan-400"></div>
+                                    <p className="text-xs font-bold text-slate-600">Active: {patient.last_touch ? formatDate(patient.last_touch) : '--'}</p>
+                                  </div>
+                                </div>
                               </td>
                               <td className="table-cell text-center">
-                                <span className="font-bold text-slate-800">
-                                  {(patient.total_appointments || 0) + (patient.total_diagnostics || 0) + (patient.total_admissions || 0)}
-                                </span>
+                                <div className="inline-flex flex-col items-center justify-center w-12 h-12 rounded-2xl bg-slate-50 border border-slate-100 group-hover:bg-cyan-50 group-hover:border-cyan-100 transition-colors">
+                                  <span className="text-lg font-black text-slate-800 group-hover:text-cyan-700">
+                                    {(patient.total_appointments || 0) + (patient.total_diagnostics || 0) + (patient.total_admissions || 0)}
+                                  </span>
+                                  <span className="text-[8px] font-bold text-slate-400 uppercase tracking-widest -mt-1">Count</span>
+                                </div>
                               </td>
-                              <td className="table-cell text-right">
-                                <div className="flex items-center justify-end gap-2">
+                              <td className="table-cell text-right pr-8">
+                                <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-all transform translate-x-2 group-hover:translate-x-0">
                                   <button
                                     onClick={() => fetchPatientDetail(patient)}
-                                    className="p-2 rounded-lg text-slate-400 hover:text-cyan-600 hover:bg-cyan-50 transition-colors"
-                                    title="View details"
+                                    className="p-2.5 rounded-xl bg-slate-50 text-slate-400 hover:text-cyan-600 hover:bg-cyan-50 transition-all shadow-sm border border-transparent hover:border-cyan-100"
+                                    title="Patient File"
                                   >
-                                    <Eye size={18} />
+                                    <Eye size={20} />
                                   </button>
                                   <button
                                     onClick={() => { setActiveTab('omnichannel'); fetchPatientDetail(patient); }}
-                                    className="p-2 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
-                                    title="Open chat"
+                                    className="p-2.5 rounded-xl bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-all shadow-sm border border-transparent hover:border-indigo-100"
+                                    title="Secure Chat"
                                   >
-                                    <MessageCircle size={18} />
+                                    <MessageCircle size={20} />
                                   </button>
                                 </div>
                               </td>
@@ -739,10 +1048,12 @@ const App: React.FC = () => {
                           );
                         }) : (
                           <tr>
-                            <td colSpan={7} className="table-cell text-center py-16">
-                              <Users size={48} className="mx-auto text-slate-200 mb-4" />
-                              <p className="text-slate-400 font-medium">No patients found</p>
-                              <p className="text-xs text-slate-400 mt-1">Try changing the channel filter or search.</p>
+                            <td colSpan={6} className="table-cell text-center py-24">
+                              <div className="bg-slate-50 w-24 h-24 rounded-3xl flex items-center justify-center mx-auto mb-6 rotate-12">
+                                <Users size={48} className="text-slate-200 -rotate-12" />
+                              </div>
+                              <p className="text-slate-500 font-bold text-xl">No patients found</p>
+                              <p className="text-sm text-slate-400 mt-2 max-w-xs mx-auto text-balance">The patient directory is currently empty. New patients will appear here as they interact with the hospital channels.</p>
                             </td>
                           </tr>
                         )}
@@ -830,74 +1141,114 @@ const App: React.FC = () => {
                   </div>
 
                   {/* Appointments Table */}
-                  <div className="table-container">
+                  <div className="table-container shadow-2xl shadow-slate-200/50">
                     <table className="w-full">
                       <thead>
-                        <tr className="border-b border-slate-100">
-                          <th className="table-header text-left">Booking ID</th>
-                          <th className="table-header text-left">Patient</th>
+                        <tr className="border-b border-slate-100/50">
+                          <th className="table-header text-left py-5">Patient Details</th>
                           <th className="table-header text-left">Channel</th>
-                          <th className="table-header text-left">Phone</th>
-                          <th className="table-header text-left">Doctor</th>
-                          <th className="table-header text-left">Date & Time</th>
+                          <th className="table-header text-left">Specialist</th>
+                          <th className="table-header text-left">Appointment Time</th>
                           <th className="table-header text-center">Status</th>
-                          <th className="table-header text-right">Actions</th>
+                          <th className="table-header text-right pr-8">Actions</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {appointments.length > 0 ? appointments.map((appt) => {
-                          const src = appt.source || 'whatsapp';
-                          const pcfg = getPlatformDisplay(src);
-                          return (
-                          <tr key={appt.booking_id} className="table-row">
-                            <td className="table-cell">
-                              <span className="font-mono text-xs bg-slate-100 px-2 py-1 rounded">{appt.booking_id}</span>
-                            </td>
-                            <td className="table-cell font-semibold text-slate-800">{appt.patient_name}</td>
-                            <td className="table-cell">
-                              <span className={`inline-flex px-2 py-0.5 rounded border text-xs font-medium ${pcfg.className}`}>{pcfg.label}</span>
-                            </td>
-                            <td className="table-cell text-slate-600">{appt.phone || '--'}</td>
-                            <td className="table-cell text-slate-600">{appt.doctor || '--'}</td>
-                            <td className="table-cell">
-                              <div>
-                                <p className="font-medium text-slate-800">{appt.date || '--'}</p>
-                                <p className="text-xs text-slate-500">{appt.time || '--'}</p>
-                              </div>
-                            </td>
-                            <td className="table-cell text-center">
-                              <span className={`badge ${getStatusBadge(appt.status)}`}>{appt.status}</span>
-                            </td>
-                            <td className="table-cell text-right">
-                              <div className="flex items-center justify-end gap-1">
-                                {appt.status === 'confirmed' && (
-                                  <>
-                                    <button
-                                      onClick={() => updateAppointmentStatus(appt.booking_id, 'completed')}
-                                      className="p-2 rounded-lg text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 transition-colors"
-                                      title="Mark Complete"
-                                    >
-                                      <CheckCircle2 size={18} />
-                                    </button>
-                                    <button
-                                      onClick={() => updateAppointmentStatus(appt.booking_id, 'cancelled')}
-                                      className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
-                                      title="Cancel"
-                                    >
-                                      <X size={18} />
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                          );
-                        }) : (
+                        {appointments.length > 0 ? (
+                          appointments
+                            .filter(a => appointmentFilter === 'all' || a.status.toLowerCase() === appointmentFilter.toLowerCase())
+                            .filter(a => appointmentSourceFilter === 'all' || (a.source || 'whatsapp').toLowerCase() === appointmentSourceFilter.toLowerCase())
+                            .map((appt) => {
+                              const src = appt.source || 'whatsapp';
+                              const pcfg = getPlatformDisplay(src);
+                              const PlatformIcon = pcfg.icon;
+
+                              return (
+                                <tr key={appt.booking_id} className="premium-table-row group">
+                                  <td className="table-cell py-5">
+                                    <div className="flex items-center gap-3">
+                                      <div className={`w-10 h-10 rounded-xl ${pcfg.bgClass} flex items-center justify-center text-white shadow-lg shadow-black/10`}>
+                                        <Users size={20} />
+                                      </div>
+                                      <div>
+                                        <p className="font-bold text-slate-800 text-base">{appt.patient_name}</p>
+                                        <div className="flex items-center gap-2 mt-0.5">
+                                          <span className="font-mono text-[10px] text-slate-400 uppercase tracking-tighter">ID: {appt.booking_id}</span>
+                                          <span className="w-1 h-1 rounded-full bg-slate-300"></span>
+                                          <span className="text-xs text-slate-500 font-medium">{appt.phone || '--'}</span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td className="table-cell">
+                                    <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full border shadow-sm ${pcfg.badgeClass} group-hover:scale-105 transition-transform`}>
+                                      <PlatformIcon size={14} style={{ color: pcfg.color }} />
+                                      <span className="text-xs font-bold uppercase tracking-wide">{pcfg.label}</span>
+                                    </div>
+                                  </td>
+                                  <td className="table-cell">
+                                    <div className="flex items-center gap-2 text-slate-700">
+                                      <div className="p-1.5 rounded-lg bg-cyan-50 text-cyan-600">
+                                        <Stethoscope size={14} />
+                                      </div>
+                                      <span className="font-medium">{appt.doctor || '--'}</span>
+                                    </div>
+                                  </td>
+                                  <td className="table-cell">
+                                    <div className="flex items-center gap-4">
+                                      <div className="premium-time-badge">
+                                        <span className="text-lg font-black text-cyan-600 leading-tight">{appt.time || '--'}</span>
+                                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-tight">{appt.date?.split(',')[0]}</span>
+                                      </div>
+                                      <div className="text-left">
+                                        <p className="text-xs font-bold text-slate-800">{appt.date?.split(',')[1] || appt.date}</p>
+                                        <p className="text-[10px] text-slate-400 font-medium">Booked at: {formatTime(appt.created_at)}</p>
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td className="table-cell text-center">
+                                    <span className={`badge ${getStatusBadge(appt.status)}`}>{appt.status}</span>
+                                  </td>
+                                  <td className="table-cell text-right pr-8">
+                                    <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                      {appt.status.toLowerCase() === 'confirmed' && (
+                                        <>
+                                          <button
+                                            onClick={() => updateAppointmentStatus(appt.booking_id, 'completed')}
+                                            className="p-2.5 rounded-xl bg-emerald-50 text-emerald-600 hover:bg-emerald-600 hover:text-white transition-all shadow-sm"
+                                            title="Complete"
+                                          >
+                                            <CheckCircle2 size={18} />
+                                          </button>
+                                          <button
+                                            onClick={() => updateAppointmentStatus(appt.booking_id, 'cancelled')}
+                                            className="p-2.5 rounded-xl bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white transition-all shadow-sm"
+                                            title="Cancel"
+                                          >
+                                            <X size={18} />
+                                          </button>
+                                        </>
+                                      )}
+                                      <button
+                                        onClick={() => { setSelectedPatient(patients.find(p => p.phone === appt.phone || p.external_id === appt.user_id) || null); setShowPatientModal(true); }}
+                                        className="p-2.5 rounded-xl bg-slate-50 text-slate-500 hover:bg-cyan-600 hover:text-white transition-all shadow-sm"
+                                        title="View Patient"
+                                      >
+                                        <Eye size={18} />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })
+                        ) : (
                           <tr>
-                            <td colSpan={8} className="table-cell text-center py-16">
-                              <Calendar size={48} className="mx-auto text-slate-200 mb-4" />
-                              <p className="text-slate-400 font-medium">No appointments found</p>
-                              <p className="text-xs text-slate-400 mt-1">Try changing status or channel filter.</p>
+                            <td colSpan={6} className="table-cell text-center py-24">
+                              <div className="bg-slate-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <Calendar size={40} className="text-slate-200" />
+                              </div>
+                              <p className="text-slate-500 font-bold text-lg">No appointments scheduled</p>
+                              <p className="text-sm text-slate-400 mt-1 max-w-xs mx-auto">Try adjusting your filters or checking different appointment channels.</p>
                             </td>
                           </tr>
                         )}
@@ -962,9 +1313,8 @@ const App: React.FC = () => {
                               key={day}
                               type="button"
                               onClick={() => setCalendarSelectedDate(dateStr)}
-                              className={`p-2 rounded-lg text-sm transition-colors ${
-                                isSelected ? 'bg-cyan-600 text-white' : count > 0 ? 'bg-cyan-50 text-cyan-700 hover:bg-cyan-100' : 'hover:bg-slate-100 text-slate-700'
-                              }`}
+                              className={`p-2 rounded-lg text-sm transition-colors ${isSelected ? 'bg-cyan-600 text-white' : count > 0 ? 'bg-cyan-50 text-cyan-700 hover:bg-cyan-100' : 'hover:bg-slate-100 text-slate-700'
+                                }`}
                             >
                               {day}
                               {count > 0 && <span className="block text-[10px] opacity-80">{count}</span>}
@@ -982,14 +1332,14 @@ const App: React.FC = () => {
                       <div className="space-y-2 max-h-[320px] overflow-y-auto">
                         {calendarSelectedDate
                           ? appointments
-                              .filter((a) => a.date === calendarSelectedDate)
-                              .map((a) => (
-                                <div key={a.booking_id} className="p-3 rounded-xl bg-slate-50 border border-slate-100">
-                                  <p className="font-semibold text-slate-800">{a.patient_name}</p>
-                                  <p className="text-xs text-slate-500">{a.doctor} • {a.time}</p>
-                                  <span className={`badge mt-1 ${getStatusBadge(a.status)}`}>{a.status}</span>
-                                </div>
-                              ))
+                            .filter((a) => a.date === calendarSelectedDate)
+                            .map((a) => (
+                              <div key={a.booking_id} className="p-3 rounded-xl bg-slate-50 border border-slate-100">
+                                <p className="font-semibold text-slate-800">{a.patient_name}</p>
+                                <p className="text-xs text-slate-500">{a.doctor} • {a.time}</p>
+                                <span className={`badge mt-1 ${getStatusBadge(a.status)}`}>{a.status}</span>
+                              </div>
+                            ))
                           : null}
                         {calendarSelectedDate && appointments.filter((a) => a.date === calendarSelectedDate).length === 0 && (
                           <p className="text-slate-400 text-sm">No appointments on this day.</p>
@@ -1060,7 +1410,10 @@ const App: React.FC = () => {
                             <td className="table-cell">
                               <span className="font-mono text-xs bg-emerald-100 px-2 py-1 rounded">{diag.booking_id}</span>
                             </td>
-                            <td className="table-cell font-semibold text-slate-800">{diag.patient_name}</td>
+                            <td className="table-cell">
+                              <p className="font-semibold text-slate-800">{diag.patient_name}</p>
+                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Booked: {formatDate(diag.created_at)}</p>
+                            </td>
                             <td className="table-cell text-slate-600">{diag.phone || '--'}</td>
                             <td className="table-cell">
                               <span className="flex items-center gap-2 text-slate-600">
@@ -1184,7 +1537,10 @@ const App: React.FC = () => {
                             <td className="table-cell">
                               <span className="font-mono text-xs bg-amber-100 px-2 py-1 rounded">{adm.admission_id}</span>
                             </td>
-                            <td className="table-cell font-semibold text-slate-800">{adm.patient_name}</td>
+                            <td className="table-cell py-4">
+                              <p className="font-semibold text-slate-800">{adm.patient_name}</p>
+                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Booked: {formatDate(adm.created_at)}</p>
+                            </td>
                             <td className="table-cell text-slate-600">{adm.phone || '--'}</td>
                             <td className="table-cell">
                               <span className={`badge ${adm.admission_type === 'Emergency' ? 'badge-danger' : 'badge-info'}`}>
@@ -1451,18 +1807,18 @@ const App: React.FC = () => {
                   {patientTimeline.slice(0, 10).map((item, idx) => {
                     const { text, options } = formatMessageForDisplay(item.message || '');
                     return (
-                    <div key={idx} className="flex items-start gap-3 p-3 rounded-xl bg-slate-50">
-                      <div className={`p-2 rounded-lg ${item.direction === 'inbound' ? 'bg-cyan-100 text-cyan-600' : 'bg-emerald-100 text-emerald-600'}`}>
-                        {item.direction === 'inbound' ? <MessageCircle size={14} /> : <Send size={14} />}
+                      <div key={idx} className="flex items-start gap-3 p-3 rounded-xl bg-slate-50">
+                        <div className={`p-2 rounded-lg ${item.direction === 'inbound' ? 'bg-cyan-100 text-cyan-600' : 'bg-emerald-100 text-emerald-600'}`}>
+                          {item.direction === 'inbound' ? <MessageCircle size={14} /> : <Send size={14} />}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-slate-700 whitespace-pre-line break-words">{text}</p>
+                          {options && options.length > 0 && (
+                            <p className="text-xs text-slate-500 mt-0.5">Options: {options.join(', ')}</p>
+                          )}
+                          <p className="text-xs text-slate-400 mt-1">{formatDate(item.timestamp)} at {formatTime(item.timestamp)}</p>
+                        </div>
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-slate-700 whitespace-pre-line break-words">{text}</p>
-                        {options && options.length > 0 && (
-                          <p className="text-xs text-slate-500 mt-0.5">Options: {options.join(', ')}</p>
-                        )}
-                        <p className="text-xs text-slate-400 mt-1">{formatDate(item.timestamp)} at {formatTime(item.timestamp)}</p>
-                      </div>
-                    </div>
                     );
                   })}
                 </div>
@@ -1471,6 +1827,53 @@ const App: React.FC = () => {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Real-time Toast Notifications */}
+      <div className="fixed top-24 right-8 z-[100] flex flex-col gap-3 w-80 pointer-events-none">
+        <AnimatePresence>
+          {toasts.map((toast) => (
+            <motion.div
+              key={toast.id}
+              initial={{ opacity: 0, x: 50, scale: 0.9 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: 20, scale: 0.9 }}
+              className="bg-white/90 backdrop-blur-xl border border-white/20 p-4 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.15)] flex gap-4 pointer-events-auto cursor-pointer group"
+              onClick={() => {
+                setToasts(prev => prev.filter(t => t.id !== toast.id));
+                if (toast.type === 'appointment') setActiveTab('appointments');
+                if (toast.type === 'diagnostic') setActiveTab('diagnostics');
+                if (toast.type === 'admission') setActiveTab('admissions');
+              }}
+            >
+              <div className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${toast.type === 'appointment' ? 'bg-cyan-500 text-white' :
+                toast.type === 'diagnostic' ? 'bg-emerald-500 text-white' :
+                  'bg-amber-500 text-white'
+                }`}>
+                {toast.type === 'appointment' && <Calendar size={20} />}
+                {toast.type === 'diagnostic' && <TestTube size={20} />}
+                {toast.type === 'admission' && <Bed size={20} />}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex justify-between items-start">
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{toast.title}</p>
+                  <span className="text-[10px] font-bold text-slate-300 group-hover:text-slate-500 transition-colors">JUST NOW</span>
+                </div>
+                <p className="text-sm font-bold text-slate-800 mt-1 truncate">{toast.patientName}</p>
+                <p className="text-xs text-slate-500 mt-0.5 line-clamp-1">{toast.message}</p>
+              </div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setToasts(prev => prev.filter(t => t.id !== toast.id));
+                }}
+                className="self-start text-slate-300 hover:text-slate-500 transition-colors"
+              >
+                <X size={14} />
+              </button>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
     </div>
   );
 };
