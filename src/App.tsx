@@ -170,6 +170,9 @@ const App: React.FC = () => {
   const [appointmentFilter, setAppointmentFilter] = useState('all');
   const [appointmentSourceFilter, setAppointmentSourceFilter] = useState('all'); // whatsapp, instagram, facebook
   const [patientPlatformFilter, setPatientPlatformFilter] = useState('all');
+  const [patientSort, setPatientSort] = useState<'recent' | 'bookings'>('recent');
+  const [appointmentDateFilter, setAppointmentDateFilter] = useState('all'); // all, today, yesterday, last7days
+  const [doctorFilter, setDoctorFilter] = useState('all');
   const [showPatientModal, setShowPatientModal] = useState(false);
   const [whatsappMessageInput, setWhatsappMessageInput] = useState('');
   const [sendingMessage, setSendingMessage] = useState(false);
@@ -431,6 +434,21 @@ const App: React.FC = () => {
 
   const unreadCount = notifications.filter(n => !n.read).length;
 
+  /** Format timestamp to relative time (Just now, 2h ago, etc) */
+  const formatRelativeTime = (timestamp: number) => {
+    if (!timestamp) return '--';
+    const now = Date.now() / 1000;
+    const diff = now - timestamp;
+
+    if (diff < 60) return 'Just now';
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    if (diff < 172800) return 'Yesterday';
+    if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+
+    return new Date(timestamp * 1000).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  };
+
   /** Parse CRM message: show text + options (handles legacy JSON/dict strings). */
   const parseMessageDisplay = (raw: string): { text: string; options?: string[] } => {
     if (!raw || typeof raw !== 'string') return { text: raw || '' };
@@ -488,6 +506,44 @@ const App: React.FC = () => {
 
   // Prepare pie chart data
   const pieData = stats ? Object.entries(stats.departments || {}).map(([name, value]) => ({ name, value })) : [];
+
+  // Get unique doctors for filtering
+  const doctorList = Array.from(new Set(appointments.map(a => a.doctor).filter(Boolean)));
+
+  // Filter and Sort Patients
+  const filteredPatients = [...patients]
+    .sort((a, b) => {
+      if (patientSort === 'recent') return (b.last_touch || 0) - (a.last_touch || 0);
+      return ((b.total_appointments || 0) + (b.total_diagnostics || 0)) - ((a.total_appointments || 0) + (a.total_diagnostics || 0));
+    });
+
+  // Filter Appointments
+  const filteredAppointments = appointments.filter(appt => {
+    // Status Filter
+    if (appointmentFilter !== 'all' && appt.status.toLowerCase() !== appointmentFilter.toLowerCase()) return false;
+
+    // Source Filter
+    if (appointmentSourceFilter !== 'all' && (appt.source || 'whatsapp').toLowerCase() !== appointmentSourceFilter.toLowerCase()) return false;
+
+    // Doctor Filter
+    if (doctorFilter !== 'all' && appt.doctor !== doctorFilter) return false;
+
+    // Date Filter
+    if (appointmentDateFilter !== 'all') {
+      const apptDate = appt.date; // Expecting YYYY-MM-DD or similar
+      const today = new Date().toISOString().split('T')[0];
+      const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+
+      if (appointmentDateFilter === 'today' && apptDate !== today) return false;
+      if (appointmentDateFilter === 'yesterday' && apptDate !== yesterday) return false;
+      if (appointmentDateFilter === 'last7days') {
+        const diff = (new Date(today).getTime() - new Date(apptDate).getTime()) / 86400000;
+        if (diff > 7 || diff < 0) return false;
+      }
+    }
+
+    return true;
+  });
 
   if (!token) {
     return <LoginForm onLoginSuccess={onLoginSuccess} apiBase={API_BASE} />;
@@ -948,17 +1004,33 @@ const App: React.FC = () => {
                   exit={{ opacity: 0 }}
                   className="space-y-6"
                 >
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-sm font-medium text-slate-500 mr-2">Channel:</span>
-                    {['all', 'whatsapp', 'instagram', 'facebook'].map((p) => (
+                  <div className="flex items-center justify-between flex-wrap gap-4">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-slate-500 mr-2">Channel:</span>
+                      {['all', 'whatsapp', 'instagram', 'facebook'].map((p) => (
+                        <button
+                          key={p}
+                          onClick={() => setPatientPlatformFilter(p)}
+                          className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${patientPlatformFilter === p ? 'bg-cyan-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                        >
+                          {p === 'all' ? 'All' : getPlatformDisplay(p).label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl">
                       <button
-                        key={p}
-                        onClick={() => setPatientPlatformFilter(p)}
-                        className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${patientPlatformFilter === p ? 'bg-cyan-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                        onClick={() => setPatientSort('recent')}
+                        className={`px-4 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${patientSort === 'recent' ? 'bg-white text-cyan-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
                       >
-                        {p === 'all' ? 'All' : getPlatformDisplay(p).label}
+                        Recently Active
                       </button>
-                    ))}
+                      <button
+                        onClick={() => setPatientSort('bookings')}
+                        className={`px-4 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${patientSort === 'bookings' ? 'bg-white text-cyan-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                      >
+                        Most Bookings
+                      </button>
+                    </div>
                   </div>
                   <div className="table-container shadow-2xl shadow-slate-200/50">
                     <table className="w-full text-left">
@@ -973,7 +1045,7 @@ const App: React.FC = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        {patients.length > 0 ? patients.map((patient) => {
+                        {filteredPatients.length > 0 ? filteredPatients.map((patient) => {
                           const pcfg = getPlatformDisplay(patient.platform || 'whatsapp');
                           const PlatformIcon = pcfg.icon;
 
@@ -1087,6 +1159,34 @@ const App: React.FC = () => {
                       ))}
                     </div>
                     <div className="flex gap-2">
+                      <span className="text-sm font-medium text-slate-500 self-center">Date:</span>
+                      {['all', 'today', 'yesterday', 'last7days'].map((d) => (
+                        <button
+                          key={d}
+                          onClick={() => setAppointmentDateFilter(d)}
+                          className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${appointmentDateFilter === d ? 'bg-cyan-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                        >
+                          {d === 'all' ? 'All Time' : d === 'last7days' ? 'Last 7 Days' : d.charAt(0).toUpperCase() + d.slice(1)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-4">
+                    <div className="flex gap-2">
+                      <span className="text-sm font-medium text-slate-500 self-center">Doctor:</span>
+                      <select
+                        value={doctorFilter}
+                        onChange={(e) => setDoctorFilter(e.target.value)}
+                        className="input py-1.5 px-3 min-w-[200px]"
+                      >
+                        <option value="all">All Specialists</option>
+                        {doctorList.map(doc => (
+                          <option key={doc} value={doc}>{doc}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex gap-2">
                       <span className="text-sm font-medium text-slate-500 self-center">Channel:</span>
                       {['all', 'whatsapp', 'instagram', 'facebook'].map((src) => (
                         <button
@@ -1154,10 +1254,8 @@ const App: React.FC = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        {appointments.length > 0 ? (
-                          appointments
-                            .filter(a => appointmentFilter === 'all' || a.status.toLowerCase() === appointmentFilter.toLowerCase())
-                            .filter(a => appointmentSourceFilter === 'all' || (a.source || 'whatsapp').toLowerCase() === appointmentSourceFilter.toLowerCase())
+                        {filteredAppointments.length > 0 ? (
+                          filteredAppointments
                             .map((appt) => {
                               const src = appt.source || 'whatsapp';
                               const pcfg = getPlatformDisplay(src);
@@ -1202,7 +1300,7 @@ const App: React.FC = () => {
                                       </div>
                                       <div className="text-left">
                                         <p className="text-xs font-bold text-slate-800">{appt.date?.split(',')[1] || appt.date}</p>
-                                        <p className="text-[10px] text-slate-400 font-medium">Booked at: {formatTime(appt.created_at)}</p>
+                                        <p className="text-[10px] text-slate-400 font-medium">Booked: {formatRelativeTime(appt.created_at)}</p>
                                       </div>
                                     </div>
                                   </td>
