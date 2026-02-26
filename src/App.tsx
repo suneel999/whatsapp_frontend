@@ -177,6 +177,8 @@ const App: React.FC = () => {
   const [patientSort, setPatientSort] = useState<'recent' | 'bookings'>('recent');
   const [appointmentDateFilter, setAppointmentDateFilter] = useState('all'); // all, today, yesterday, last7days
   const [doctorFilter, setDoctorFilter] = useState('all');
+  const [appointmentSort, setAppointmentSort] = useState<'schedule_asc' | 'schedule_desc' | 'booked_newest' | 'booked_oldest'>('schedule_asc');
+  const [notificationFilter, setNotificationFilter] = useState<'all' | 'unread'>('all');
   const [showPatientModal, setShowPatientModal] = useState(false);
   const [hospitalPatientIdInput, setHospitalPatientIdInput] = useState('');
   const [savingHospitalPatientId, setSavingHospitalPatientId] = useState(false);
@@ -478,6 +480,11 @@ const App: React.FC = () => {
     });
   };
 
+  const finalizeNextAppointment = async () => {
+    if (frontDeskQueue.length === 0) return;
+    await updateAppointmentStatus(frontDeskQueue[0].booking_id, 'completed');
+  };
+
   const formatAppointmentDate = (dateStr?: string) => {
     if (!dateStr) return '--';
     const parsed = new Date(dateStr);
@@ -487,6 +494,14 @@ const App: React.FC = () => {
 
   const markAllAsRead = () => {
     setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+  };
+
+  const markNotificationAsRead = (id: string) => {
+    setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+  };
+
+  const clearReadNotifications = () => {
+    setNotifications(prev => prev.filter(n => !n.read));
   };
 
   const unreadCount = notifications.filter(n => !n.read).length;
@@ -574,6 +589,19 @@ const App: React.FC = () => {
     return '';
   };
 
+  const parseSlotToMinutes = (slot?: string | null): number => {
+    if (!slot) return Number.MAX_SAFE_INTEGER;
+    const s = slot.trim().toUpperCase();
+    const m = s.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/);
+    if (!m) return Number.MAX_SAFE_INTEGER;
+    let hours = parseInt(m[1], 10);
+    const minutes = parseInt(m[2], 10);
+    const meridiem = m[3];
+    if (meridiem === 'PM' && hours !== 12) hours += 12;
+    if (meridiem === 'AM' && hours === 12) hours = 0;
+    return hours * 60 + minutes;
+  };
+
   const todayIso = new Date().toISOString().split('T')[0];
   const todayScheduledAppointments = appointments
     .filter((a) => toIsoDate(a.date) === todayIso && a.status.toLowerCase() !== 'cancelled')
@@ -597,7 +625,7 @@ const App: React.FC = () => {
       return ((b.total_appointments || 0) + (b.total_diagnostics || 0)) - ((a.total_appointments || 0) + (a.total_diagnostics || 0));
     });
 
-  // Filter Appointments
+  // Filter + sort appointments for operations view
   const filteredAppointments = appointments.filter(appt => {
     // Status Filter
     if (appointmentFilter !== 'all' && appt.status.toLowerCase() !== appointmentFilter.toLowerCase()) return false;
@@ -610,7 +638,7 @@ const App: React.FC = () => {
 
     // Date Filter
     if (appointmentDateFilter !== 'all') {
-      const apptDate = appt.date; // Expecting YYYY-MM-DD or similar
+      const apptDate = toIsoDate(appt.date);
       const today = new Date().toISOString().split('T')[0];
       const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
 
@@ -623,7 +651,37 @@ const App: React.FC = () => {
     }
 
     return true;
+  }).sort((a, b) => {
+    const dateA = toIsoDate(a.date) || '9999-12-31';
+    const dateB = toIsoDate(b.date) || '9999-12-31';
+    const timeA = parseSlotToMinutes(a.time);
+    const timeB = parseSlotToMinutes(b.time);
+
+    if (appointmentSort === 'schedule_desc') {
+      if (dateA !== dateB) return dateB.localeCompare(dateA);
+      return timeB - timeA;
+    }
+
+    if (appointmentSort === 'booked_newest') {
+      return (b.created_at || 0) - (a.created_at || 0);
+    }
+
+    if (appointmentSort === 'booked_oldest') {
+      return (a.created_at || 0) - (b.created_at || 0);
+    }
+
+    // schedule_asc
+    if (dateA !== dateB) return dateA.localeCompare(dateB);
+    return timeA - timeB;
   });
+
+  const frontDeskQueue = filteredAppointments
+    .filter((a) => toIsoDate(a.date) === todayIso && a.status.toLowerCase() === 'confirmed')
+    .sort((a, b) => parseSlotToMinutes(a.time) - parseSlotToMinutes(b.time));
+
+  const visibleNotifications = notificationFilter === 'unread'
+    ? notifications.filter((n) => !n.read)
+    : notifications;
 
   if (!token) {
     return <LoginForm onLoginSuccess={onLoginSuccess} apiBase={API_BASE} />;
@@ -758,21 +816,43 @@ const App: React.FC = () => {
                             Notifications
                             {unreadCount > 0 && <span className="bg-cyan-100 text-cyan-700 text-[10px] px-2 py-0.5 rounded-full uppercase">{unreadCount} New</span>}
                           </h3>
+                          <div className="flex items-center gap-3">
+                            <button
+                              onClick={clearReadNotifications}
+                              className="text-[10px] font-bold text-slate-500 uppercase hover:underline"
+                            >
+                              Clear Read
+                            </button>
+                            <button
+                              onClick={markAllAsRead}
+                              className="text-[10px] font-bold text-cyan-600 uppercase hover:underline"
+                            >
+                              Mark all read
+                            </button>
+                          </div>
+                        </div>
+                        <div className="px-4 py-2 border-b border-slate-50 bg-white flex items-center gap-2">
                           <button
-                            onClick={markAllAsRead}
-                            className="text-[10px] font-bold text-cyan-600 uppercase hover:underline"
+                            onClick={() => setNotificationFilter('all')}
+                            className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide ${notificationFilter === 'all' ? 'bg-cyan-100 text-cyan-700' : 'bg-slate-100 text-slate-500'}`}
                           >
-                            Mark all read
+                            All
+                          </button>
+                          <button
+                            onClick={() => setNotificationFilter('unread')}
+                            className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide ${notificationFilter === 'unread' ? 'bg-cyan-100 text-cyan-700' : 'bg-slate-100 text-slate-500'}`}
+                          >
+                            Unread ({unreadCount})
                           </button>
                         </div>
                         <div className="max-h-[400px] overflow-y-auto">
-                          {notifications.length > 0 ? (
-                            notifications.map(n => (
+                          {visibleNotifications.length > 0 ? (
+                            visibleNotifications.map(n => (
                               <div
                                 key={n.id}
                                 className={`p-4 border-b border-slate-50 last:border-0 hover:bg-slate-50 transition-colors cursor-pointer ${!n.read ? 'bg-cyan-50/30' : ''}`}
                                 onClick={() => {
-                                  setNotifications(prev => prev.map(notif => notif.id === n.id ? { ...notif, read: true } : notif));
+                                  markNotificationAsRead(n.id);
                                   if (n.type === 'appointment') setActiveTab('appointments');
                                   if (n.type === 'diagnostic') setActiveTab('diagnostics');
                                   if (n.type === 'admission') setActiveTab('admissions');
@@ -790,10 +870,22 @@ const App: React.FC = () => {
                                   </div>
                                   <div className="min-w-0">
                                     <p className="text-sm font-bold text-slate-800 truncate">{n.title}</p>
-                                    <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{n.message}</p>
-                                    <p className="text-[10px] text-slate-400 mt-2 font-medium flex items-center gap-1">
-                                      <Clock size={10} /> {formatTime(n.timestamp)} â€¢ {n.source || 'WhatsApp'}
-                                    </p>
+                                    <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{n.message}</p>                                    <div className="flex items-center justify-between mt-2 gap-2">
+                                      <p className="text-[10px] text-slate-400 font-medium flex items-center gap-1">
+                                        <Clock size={10} /> {formatRelativeTime(n.timestamp)} ? {n.source || 'WhatsApp'}
+                                      </p>
+                                      {!n.read && (
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            markNotificationAsRead(n.id);
+                                          }}
+                                          className="text-[10px] font-bold text-cyan-600 uppercase hover:underline"
+                                        >
+                                          Mark Read
+                                        </button>
+                                      )}
+                                    </div>
                                   </div>
                                 </div>
                               </div>
@@ -1104,6 +1196,23 @@ const App: React.FC = () => {
                   exit={{ opacity: 0 }}
                   className="space-y-6"
                 >
+                  <div className="card p-5 bg-gradient-to-r from-cyan-50 to-white border-cyan-100">
+                    <div className="flex flex-wrap items-center justify-between gap-4">
+                      <div>
+                        <h4 className="font-bold text-slate-800">How Front Office Uses This Screen</h4>
+                        <p className="text-sm text-slate-600 mt-1">Find repeat patients, open their full timeline, then jump to chat or appointments in one click.</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => setActiveTab('appointments')} className="btn btn-secondary">
+                          <Calendar size={16} /> Open Appointments
+                        </button>
+                        <button onClick={() => setActiveTab('omnichannel')} className="btn btn-secondary">
+                          <MessageSquare size={16} /> Open Messages
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="flex items-center justify-between flex-wrap gap-4">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium text-slate-500 mr-2">Channel:</span>
@@ -1298,6 +1407,70 @@ const App: React.FC = () => {
                         </button>
                       ))}
                     </div>
+                    <div className="flex gap-2 items-center">
+                      <span className="text-sm font-medium text-slate-500 self-center">Sort:</span>
+                      <select
+                        value={appointmentSort}
+                        onChange={(e) => setAppointmentSort(e.target.value as 'schedule_asc' | 'schedule_desc' | 'booked_newest' | 'booked_oldest')}
+                        className="input py-1.5 px-3 min-w-[220px]"
+                      >
+                        <option value="schedule_asc">Schedule (Earliest first)</option>
+                        <option value="schedule_desc">Schedule (Latest first)</option>
+                        <option value="booked_newest">Booked Date (Newest first)</option>
+                        <option value="booked_oldest">Booked Date (Oldest first)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="card p-5">
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="font-bold text-slate-800">Front Desk Queue (Today Confirmed)</h4>
+                      <button
+                        type="button"
+                        onClick={finalizeNextAppointment}
+                        disabled={frontDeskQueue.length === 0}
+                        className="btn btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <CheckCircle2 size={16} /> Finalize Next
+                      </button>
+                    </div>
+                    {frontDeskQueue.length > 0 ? (
+                      <div className="space-y-2 max-h-52 overflow-y-auto custom-scrollbar pr-1">
+                        {frontDeskQueue.slice(0, 8).map((appt) => (
+                          <div key={`queue-${appt.booking_id}`} className="flex items-center justify-between gap-3 p-3 rounded-xl bg-slate-50">
+                            <div className="min-w-0">
+                              <p className="font-semibold text-slate-800 truncate">{appt.patient_name}</p>
+                              <p className="text-xs text-slate-500">{formatAppointmentDate(appt.date)} • {appt.time || '--'} • {appt.doctor || '--'}</p>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => updateAppointmentStatus(appt.booking_id, 'completed')}
+                                className="p-2 rounded-lg text-emerald-600 hover:bg-emerald-100 transition-colors"
+                                title="Finalize Completed"
+                              >
+                                <CheckCircle2 size={16} />
+                              </button>
+                              <button
+                                onClick={() => updateAppointmentStatus(appt.booking_id, 'no-show')}
+                                className="p-2 rounded-lg text-amber-600 hover:bg-amber-100 transition-colors"
+                                title="Mark No-show"
+                              >
+                                <AlertCircle size={16} />
+                              </button>
+                              <button
+                                onClick={() => cancelAppointment(appt.booking_id)}
+                                className="p-2 rounded-lg text-rose-600 hover:bg-rose-100 transition-colors"
+                                title="Cancel"
+                              >
+                                <X size={16} />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-400">No confirmed appointments in today queue.</p>
+                    )}
                   </div>
 
                   {/* Stats Row */}
