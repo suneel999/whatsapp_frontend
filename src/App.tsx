@@ -478,6 +478,13 @@ const App: React.FC = () => {
     });
   };
 
+  const formatAppointmentDate = (dateStr?: string) => {
+    if (!dateStr) return '--';
+    const parsed = new Date(dateStr);
+    if (Number.isNaN(parsed.getTime())) return dateStr;
+    return parsed.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  };
+
   const markAllAsRead = () => {
     setNotifications(prev => prev.map(n => ({ ...n, read: true })));
   };
@@ -1342,7 +1349,8 @@ const App: React.FC = () => {
                           <th className="table-header text-left">Patient ID</th>
                           <th className="table-header text-left">Channel</th>
                           <th className="table-header text-left">Specialist</th>
-                          <th className="table-header text-left">Appointment Time</th>
+                          <th className="table-header text-left">Schedule</th>
+                          <th className="table-header text-left">Booked At</th>
                           <th className="table-header text-center">Status</th>
                           <th className="table-header text-right pr-8">Actions</th>
                         </tr>
@@ -1392,16 +1400,14 @@ const App: React.FC = () => {
                                     </div>
                                   </td>
                                   <td className="table-cell">
-                                    <div className="flex items-center gap-4">
-                                      <div className="premium-time-badge">
-                                        <span className="text-lg font-black text-cyan-600 leading-tight">{appt.time || '--'}</span>
-                                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-tight">{appt.date?.split(',')[0]}</span>
-                                      </div>
-                                      <div className="text-left">
-                                        <p className="text-xs font-bold text-slate-800">{appt.date?.split(',')[1] || appt.date}</p>
-                                        <p className="text-[10px] text-slate-400 font-medium">Booked: {formatRelativeTime(appt.created_at)}</p>
-                                      </div>
+                                    <div className="text-left">
+                                      <p className="text-xs font-bold text-slate-800">Date: {formatAppointmentDate(appt.date)}</p>
+                                      <p className="text-sm font-extrabold text-cyan-600">Time: {appt.time || '--'}</p>
                                     </div>
+                                  </td>
+                                  <td className="table-cell">
+                                    <p className="text-xs font-semibold text-slate-700">{formatDateTime(appt.created_at)}</p>
+                                    <p className="text-[10px] text-slate-400 font-medium">{formatRelativeTime(appt.created_at)}</p>
                                   </td>
                                   <td className="table-cell text-center">
                                     <span className={`badge ${getStatusBadge(appt.status)}`}>{appt.status}</span>
@@ -1440,7 +1446,7 @@ const App: React.FC = () => {
                             })
                         ) : (
                           <tr>
-                            <td colSpan={7} className="table-cell text-center py-24">
+                            <td colSpan={8} className="table-cell text-center py-24">
                               <div className="bg-slate-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-4">
                                 <Calendar size={40} className="text-slate-200" />
                               </div>
@@ -1825,11 +1831,11 @@ const App: React.FC = () => {
                             </div>
                             <div className="flex-1 min-w-0">
                               <p className="font-semibold text-slate-800 truncate">{patient.name || 'Patient'}</p>
-                              <p className="text-xs text-slate-400 truncate flex items-center gap-1.5">
+                              <p className="text-xs text-slate-400 flex items-center gap-1.5">
                                 <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium ${getPlatformDisplay(patient.platform || 'whatsapp').className}`}>
                                   {getPlatformDisplay(patient.platform || 'whatsapp').short}
                                 </span>
-                                {patient.external_id?.slice(-8)}
+                                <span className="font-mono break-all">{patient.phone || patient.external_id || '--'}</span>
                               </p>
                             </div>
                             <span className="text-xs text-slate-400">{patient.last_touch ? formatTime(patient.last_touch) : ''}</span>
