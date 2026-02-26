@@ -38,6 +38,7 @@ interface Patient {
   id: number;
   external_id: string;
   platform: string;
+  hospital_patient_id?: string | null;
   name: string | null;
   phone: string | null;
   email: string | null;
@@ -54,6 +55,7 @@ interface Appointment {
   booking_id: string;
   user_id: string;
   patient_name: string;
+  patient_identifier?: string | null;
   phone: string;
   department: string;
   department_name: string;
@@ -61,6 +63,9 @@ interface Appointment {
   date: string;
   time: string;
   status: string;
+  cancel_reason?: string | null;
+  cancelled_by?: string | null;
+  cancelled_at?: number | null;
   source: string;
   created_at: number;
 }
@@ -162,7 +167,6 @@ const App: React.FC = () => {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
   const [admissions, setAdmissions] = useState<Admission[]>([]);
-  const [todayAppointments, setTodayAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
@@ -174,6 +178,8 @@ const App: React.FC = () => {
   const [appointmentDateFilter, setAppointmentDateFilter] = useState('all'); // all, today, yesterday, last7days
   const [doctorFilter, setDoctorFilter] = useState('all');
   const [showPatientModal, setShowPatientModal] = useState(false);
+  const [hospitalPatientIdInput, setHospitalPatientIdInput] = useState('');
+  const [savingHospitalPatientId, setSavingHospitalPatientId] = useState(false);
   const [whatsappMessageInput, setWhatsappMessageInput] = useState('');
   const [sendingMessage, setSendingMessage] = useState(false);
   const [calendarMonth, setCalendarMonth] = useState(() => new Date());
@@ -263,15 +269,15 @@ const App: React.FC = () => {
 
   const fetchData = useCallback(async () => {
     try {
-      const [statsRes, weeklyRes, feedRes, patientsRes, appointmentsRes, diagnosticsRes, admissionsRes, todayRes] = await Promise.all([
+      const encodedSearch = encodeURIComponent(searchTerm || '');
+      const [statsRes, weeklyRes, feedRes, patientsRes, appointmentsRes, diagnosticsRes, admissionsRes] = await Promise.all([
         axios.get(`${API_BASE}/api/stats`),
         axios.get(`${API_BASE}/api/analytics/weekly`),
         axios.get(`${API_BASE}/api/live-feed?limit=15`),
-        axios.get(`${API_BASE}/api/patients?search=${searchTerm}&limit=50&platform=${patientPlatformFilter}`),
-        axios.get(`${API_BASE}/api/appointments?status=${appointmentFilter}&source=${appointmentSourceFilter}`),
+        axios.get(`${API_BASE}/api/patients?search=${encodedSearch}&limit=50&platform=${patientPlatformFilter}`),
+        axios.get(`${API_BASE}/api/appointments?status=${appointmentFilter}&source=${appointmentSourceFilter}&search=${encodedSearch}`),
         axios.get(`${API_BASE}/api/diagnostics`),
-        axios.get(`${API_BASE}/api/admissions`),
-        axios.get(`${API_BASE}/api/appointments/today`)
+        axios.get(`${API_BASE}/api/admissions`)
       ]);
 
       setStats(statsRes.data);
@@ -281,7 +287,6 @@ const App: React.FC = () => {
       setAppointments(appointmentsRes.data);
       setDiagnostics(diagnosticsRes.data);
       setAdmissions(admissionsRes.data);
-      setTodayAppointments(todayRes.data);
 
       // --- NOTIFICATION DETECTION LOGIC ---
       if (!loading) {
@@ -366,6 +371,12 @@ const App: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    if (selectedPatient) {
+      setHospitalPatientIdInput(selectedPatient.hospital_patient_id || '');
+    }
+  }, [selectedPatient]);
+
   const sendWhatsAppMessage = async () => {
     if (!selectedPatient || !whatsappMessageInput.trim()) return;
     setSendingMessage(true);
@@ -400,6 +411,19 @@ const App: React.FC = () => {
     }
   };
 
+  const cancelAppointment = async (bookingId: string) => {
+    const reason = window.prompt('Reason for cancellation (optional):') || '';
+    try {
+      await axios.post(`${API_BASE}/api/appointments/${bookingId}/cancel`, {
+        reason: reason.trim(),
+        cancelled_by: 'staff'
+      });
+      fetchData();
+    } catch (err) {
+      console.error('Error cancelling appointment:', err);
+    }
+  };
+
   const updateDiagnosticStatus = async (bookingId: string, status: string) => {
     try {
       await axios.put(`${API_BASE}/api/diagnostics/${bookingId}/status`, { status });
@@ -418,6 +442,22 @@ const App: React.FC = () => {
     }
   };
 
+  const saveHospitalPatientId = async () => {
+    if (!selectedPatient || !hospitalPatientIdInput.trim()) return;
+    setSavingHospitalPatientId(true);
+    try {
+      await axios.put(`${API_BASE}/api/patients/${selectedPatient.id}/hospital-id`, {
+        hospital_patient_id: hospitalPatientIdInput.trim()
+      });
+      await fetchData();
+      setSelectedPatient((prev) => prev ? { ...prev, hospital_patient_id: hospitalPatientIdInput.trim() } : prev);
+    } catch (err) {
+      console.error('Error saving hospital patient ID:', err);
+    } finally {
+      setSavingHospitalPatientId(false);
+    }
+  };
+
   const formatTime = (timestamp: number) => {
     if (!timestamp) return '--';
     return new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -426,6 +466,16 @@ const App: React.FC = () => {
   const formatDate = (timestamp: number) => {
     if (!timestamp) return '--';
     return new Date(timestamp * 1000).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  };
+
+  const formatDateTime = (timestamp: number) => {
+    if (!timestamp) return '--';
+    return new Date(timestamp * 1000).toLocaleString('en-GB', {
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
   };
 
   const markAllAsRead = () => {
@@ -506,6 +556,29 @@ const App: React.FC = () => {
 
   // Prepare pie chart data
   const pieData = stats ? Object.entries(stats.departments || {}).map(([name, value]) => ({ name, value })) : [];
+
+  const toIsoDate = (input?: string | null): string => {
+    if (!input) return '';
+    const raw = input.trim();
+    if (!raw) return '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().split('T')[0];
+    return '';
+  };
+
+  const todayIso = new Date().toISOString().split('T')[0];
+  const todayScheduledAppointments = appointments
+    .filter((a) => toIsoDate(a.date) === todayIso && a.status.toLowerCase() !== 'cancelled')
+    .sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+
+  const todayBookedAppointments = appointments
+    .filter((a) => {
+      if (!a.created_at) return false;
+      const createdIso = new Date(a.created_at * 1000).toISOString().split('T')[0];
+      return createdIso === todayIso;
+    })
+    .sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
 
   // Get unique doctors for filtering
   const doctorList = Array.from(new Set(appointments.map(a => a.doctor).filter(Boolean)));
@@ -712,7 +785,7 @@ const App: React.FC = () => {
                                     <p className="text-sm font-bold text-slate-800 truncate">{n.title}</p>
                                     <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{n.message}</p>
                                     <p className="text-[10px] text-slate-400 mt-2 font-medium flex items-center gap-1">
-                                      <Clock size={10} /> {formatTime(n.timestamp)} • {n.source || 'WhatsApp'}
+                                      <Clock size={10} /> {formatTime(n.timestamp)} â€¢ {n.source || 'WhatsApp'}
                                     </p>
                                   </div>
                                 </div>
@@ -881,14 +954,14 @@ const App: React.FC = () => {
 
                   {/* Bottom Row */}
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {/* Today's Schedule */}
+                                        {/* Today's Schedule */}
                     <div className="card p-6">
                       <div className="flex justify-between items-center mb-6">
                         <h3 className="font-bold text-slate-800">Today's Schedule</h3>
-                        <span className="badge badge-info">{todayAppointments.length} appointments</span>
+                        <span className="badge badge-info">{todayScheduledAppointments.length} appointments</span>
                       </div>
-                      <div className="space-y-3 max-h-80 overflow-y-auto custom-scrollbar">
-                        {todayAppointments.length > 0 ? todayAppointments.map((appt) => {
+                      <div className="space-y-3 max-h-72 overflow-y-auto custom-scrollbar">
+                        {todayScheduledAppointments.length > 0 ? todayScheduledAppointments.map((appt) => {
                           const src = appt.source || 'whatsapp';
                           const pcfg = getPlatformDisplay(src);
                           return (
@@ -903,8 +976,9 @@ const App: React.FC = () => {
                                 </div>
                                 <p className="text-xs text-slate-500 flex items-center gap-2">
                                   {getDeptIcon(appt.department_name)}
-                                  {appt.department_name || 'General'} • {appt.doctor || 'Doctor'}
+                                  {appt.department_name || 'General'} - {appt.doctor || 'Doctor'}
                                 </p>
+                                <p className="text-[11px] text-slate-400 mt-1">Booked at: {formatDateTime(appt.created_at)}</p>
                               </div>
                               <span className={`badge ${getStatusBadge(appt.status)}`}>{appt.status}</span>
                             </div>
@@ -916,8 +990,27 @@ const App: React.FC = () => {
                           </div>
                         )}
                       </div>
-                    </div>
 
+                      <div className="mt-5 pt-5 border-t border-slate-100">
+                        <div className="flex justify-between items-center mb-3">
+                          <p className="text-sm font-bold text-slate-700">Booked Today (Placed Time)</p>
+                          <span className="badge badge-default">{todayBookedAppointments.length}</span>
+                        </div>
+                        <div className="space-y-2 max-h-44 overflow-y-auto custom-scrollbar">
+                          {todayBookedAppointments.length > 0 ? todayBookedAppointments.map((appt) => (
+                            <div key={`placed-${appt.booking_id}`} className="flex items-center justify-between gap-3 p-2.5 rounded-lg bg-slate-50">
+                              <div className="min-w-0">
+                                <p className="text-sm font-semibold text-slate-800 truncate">{appt.patient_name}</p>
+                                <p className="text-[11px] text-slate-500 truncate">{appt.booking_id} - {appt.doctor || 'Doctor'}</p>
+                              </div>
+                              <span className="text-xs font-semibold text-slate-600 whitespace-nowrap">{formatDateTime(appt.created_at)}</span>
+                            </div>
+                          )) : (
+                            <p className="text-sm text-slate-400 text-center py-4">No bookings placed today</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
                     {/* Live Activity Feed */}
                     <div className="card p-6">
                       <div className="flex justify-between items-center mb-6">
@@ -1246,6 +1339,7 @@ const App: React.FC = () => {
                       <thead>
                         <tr className="border-b border-slate-100/50">
                           <th className="table-header text-left py-5">Patient Details</th>
+                          <th className="table-header text-left">Patient ID</th>
                           <th className="table-header text-left">Channel</th>
                           <th className="table-header text-left">Specialist</th>
                           <th className="table-header text-left">Appointment Time</th>
@@ -1277,6 +1371,11 @@ const App: React.FC = () => {
                                         </div>
                                       </div>
                                     </div>
+                                  </td>
+                                  <td className="table-cell">
+                                    <span className="font-mono text-xs text-slate-600">
+                                      {appt.patient_identifier || '--'}
+                                    </span>
                                   </td>
                                   <td className="table-cell">
                                     <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full border shadow-sm ${pcfg.badgeClass} group-hover:scale-105 transition-transform`}>
@@ -1319,7 +1418,7 @@ const App: React.FC = () => {
                                             <CheckCircle2 size={18} />
                                           </button>
                                           <button
-                                            onClick={() => updateAppointmentStatus(appt.booking_id, 'cancelled')}
+                                            onClick={() => cancelAppointment(appt.booking_id)}
                                             className="p-2.5 rounded-xl bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white transition-all shadow-sm"
                                             title="Cancel"
                                           >
@@ -1341,7 +1440,7 @@ const App: React.FC = () => {
                             })
                         ) : (
                           <tr>
-                            <td colSpan={6} className="table-cell text-center py-24">
+                            <td colSpan={7} className="table-cell text-center py-24">
                               <div className="bg-slate-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-4">
                                 <Calendar size={40} className="text-slate-200" />
                               </div>
@@ -1434,7 +1533,7 @@ const App: React.FC = () => {
                             .map((a) => (
                               <div key={a.booking_id} className="p-3 rounded-xl bg-slate-50 border border-slate-100">
                                 <p className="font-semibold text-slate-800">{a.patient_name}</p>
-                                <p className="text-xs text-slate-500">{a.doctor} • {a.time}</p>
+                                <p className="text-xs text-slate-500">{a.doctor} â€¢ {a.time}</p>
                                 <span className={`badge mt-1 ${getStatusBadge(a.status)}`}>{a.status}</span>
                               </div>
                             ))
@@ -1880,6 +1979,27 @@ const App: React.FC = () => {
                 </button>
               </div>
 
+              <div className="p-6 border-b border-slate-100 bg-slate-50/70">
+                <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Hospital Patient ID</p>
+                <div className="flex gap-3">
+                  <input
+                    type="text"
+                    value={hospitalPatientIdInput}
+                    onChange={(e) => setHospitalPatientIdInput(e.target.value)}
+                    placeholder="Enter patient ID from your hospital system"
+                    className="input flex-1"
+                  />
+                  <button
+                    type="button"
+                    onClick={saveHospitalPatientId}
+                    disabled={savingHospitalPatientId || !hospitalPatientIdInput.trim()}
+                    className="btn btn-primary"
+                  >
+                    {savingHospitalPatientId ? 'Saving...' : 'Save ID'}
+                  </button>
+                </div>
+              </div>
+
               <div className="p-6 grid grid-cols-4 gap-4 border-b border-slate-100">
                 <div className="text-center p-4 bg-slate-50 rounded-xl">
                   <p className="text-2xl font-bold text-cyan-600">{selectedPatient.total_appointments || 0}</p>
@@ -1977,3 +2097,7 @@ const App: React.FC = () => {
 };
 
 export default App;
+
+
+
+
