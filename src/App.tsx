@@ -39,6 +39,7 @@ interface Patient {
   external_id: string;
   platform: string;
   hospital_patient_id?: string | null;
+  automation_paused?: number | boolean;
   name: string | null;
   phone: string | null;
   email: string | null;
@@ -182,6 +183,7 @@ const App: React.FC = () => {
   const [showPatientModal, setShowPatientModal] = useState(false);
   const [hospitalPatientIdInput, setHospitalPatientIdInput] = useState('');
   const [savingHospitalPatientId, setSavingHospitalPatientId] = useState(false);
+  const [updatingAutomation, setUpdatingAutomation] = useState(false);
   const [whatsappMessageInput, setWhatsappMessageInput] = useState('');
   const [sendingMessage, setSendingMessage] = useState(false);
   const [calendarMonth, setCalendarMonth] = useState(() => new Date());
@@ -458,6 +460,37 @@ const App: React.FC = () => {
     } finally {
       setSavingHospitalPatientId(false);
     }
+  };
+
+  const isAutomationPaused = (patient?: Patient | null): boolean => {
+    if (!patient) return false;
+    return patient.automation_paused === true || patient.automation_paused === 1;
+  };
+
+  const togglePatientAutomation = async () => {
+    if (!selectedPatient) return;
+    const paused = !isAutomationPaused(selectedPatient);
+    setUpdatingAutomation(true);
+    try {
+      await axios.put(`${API_BASE}/api/patients/${selectedPatient.id}/automation`, { paused });
+      setSelectedPatient(prev => prev ? { ...prev, automation_paused: paused ? 1 : 0 } : prev);
+      setPatients(prev => prev.map(p => p.id === selectedPatient.id ? { ...p, automation_paused: paused ? 1 : 0 } : p));
+    } catch (err) {
+      console.error('Error updating automation status:', err);
+    } finally {
+      setUpdatingAutomation(false);
+    }
+  };
+
+  const getPatientDisplayName = (patient: Patient): string =>
+    patient.name && patient.name.toLowerCase() !== 'anonymous'
+      ? patient.name
+      : 'Unknown Patient';
+
+  const getPatientDisplayNumber = (patient: Patient): string => {
+    if (patient.phone) return patient.phone;
+    if ((patient.platform || '').toLowerCase() === 'whatsapp' && patient.external_id) return patient.external_id;
+    return '--';
   };
 
   const formatTime = (timestamp: number) => {
@@ -1245,9 +1278,10 @@ const App: React.FC = () => {
                     <table className="w-full text-left">
                       <thead>
                         <tr className="border-b border-slate-100/50">
-                          <th className="table-header py-5">Patient Identity</th>
+                          <th className="table-header py-5">Name</th>
+                          <th className="table-header">Number</th>
                           <th className="table-header">Primary Channel</th>
-                          <th className="table-header">Contact & ID</th>
+                          <th className="table-header">Patient ID</th>
                           <th className="table-header">Lifecycle</th>
                           <th className="table-header text-center">Total Bookings</th>
                           <th className="table-header text-right pr-8">Actions</th>
@@ -1267,13 +1301,14 @@ const App: React.FC = () => {
                                   </div>
                                   <div>
                                     <p className="font-bold text-slate-800 text-base">
-                                      {patient.name && patient.name.toLowerCase() !== 'anonymous'
-                                        ? patient.name
-                                        : (patient.phone || patient.external_id || 'Unknown Patient')}
+                                      {getPatientDisplayName(patient)}
                                     </p>
                                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">Verified Profile</p>
                                   </div>
                                 </div>
+                              </td>
+                              <td className="table-cell">
+                                <p className="text-sm font-semibold text-slate-700 font-mono break-all">{getPatientDisplayNumber(patient)}</p>
                               </td>
                               <td className="table-cell">
                                 <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full border shadow-sm ${pcfg.badgeClass}`}>
@@ -1283,8 +1318,8 @@ const App: React.FC = () => {
                               </td>
                               <td className="table-cell">
                                 <div className="space-y-1">
-                                  <p className="text-sm font-bold text-slate-700">{patient.phone || '--'}</p>
-                                  <p className="text-[10px] font-mono text-slate-400 uppercase tracking-tighter">ID: {patient.external_id?.slice(-12)}</p>
+                                  <p className="text-[10px] font-mono text-slate-400 uppercase tracking-tighter">External: {patient.external_id?.slice(-18) || '--'}</p>
+                                  <p className="text-[10px] font-mono text-slate-400 uppercase tracking-tighter">Hospital: {patient.hospital_patient_id || '--'}</p>
                                 </div>
                               </td>
                               <td className="table-cell">
@@ -1329,7 +1364,7 @@ const App: React.FC = () => {
                           );
                         }) : (
                           <tr>
-                            <td colSpan={6} className="table-cell text-center py-24">
+                            <td colSpan={7} className="table-cell text-center py-24">
                               <div className="bg-slate-50 w-24 h-24 rounded-3xl flex items-center justify-center mx-auto mb-6 rotate-12">
                                 <Users size={48} className="text-slate-200 -rotate-12" />
                               </div>
@@ -2003,13 +2038,13 @@ const App: React.FC = () => {
                               <span className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${getPlatformDisplay(patient.platform || 'whatsapp').bgClass}`}></span>
                             </div>
                             <div className="flex-1 min-w-0">
-                              <p className="font-semibold text-slate-800 truncate">{patient.name || 'Patient'}</p>
-                              <p className="text-xs text-slate-400 flex items-center gap-1.5">
+                              <p className="font-semibold text-slate-800 truncate">{getPatientDisplayName(patient)}</p>
+                              <p className="text-xs mt-0.5">
                                 <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium ${getPlatformDisplay(patient.platform || 'whatsapp').className}`}>
                                   {getPlatformDisplay(patient.platform || 'whatsapp').short}
                                 </span>
-                                <span className="font-mono break-all">{patient.phone || patient.external_id || '--'}</span>
                               </p>
+                              <p className="text-xs text-slate-500 font-mono break-all mt-1">{getPatientDisplayNumber(patient)}</p>
                             </div>
                             <span className="text-xs text-slate-400">{patient.last_touch ? formatTime(patient.last_touch) : ''}</span>
                           </div>
@@ -2029,7 +2064,7 @@ const App: React.FC = () => {
                               {selectedPatient.name?.charAt(0) || 'P'}
                             </div>
                             <div>
-                              <p className="font-semibold text-slate-800">{selectedPatient.name || 'Patient'}</p>
+                              <p className="font-semibold text-slate-800">{getPatientDisplayName(selectedPatient)}</p>
                               <p className="text-xs flex items-center gap-1.5">
                                 <span className={`w-1.5 h-1.5 rounded-full ${getPlatformDisplay(selectedPatient.platform || 'whatsapp').bgClass}`}></span>
                                 <span className="font-medium text-slate-600">{getPlatformDisplay(selectedPatient.platform || 'whatsapp').label}</span>
@@ -2037,6 +2072,16 @@ const App: React.FC = () => {
                             </div>
                           </div>
                           <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={togglePatientAutomation}
+                              disabled={updatingAutomation}
+                              className={`btn ${isAutomationPaused(selectedPatient) ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' : 'btn-secondary'} disabled:opacity-60`}
+                              title={isAutomationPaused(selectedPatient) ? 'Resume automation for this patient' : 'Pause automation for this patient'}
+                            >
+                              <span className={`w-2 h-2 rounded-full ${isAutomationPaused(selectedPatient) ? 'bg-amber-500' : 'bg-emerald-500'}`}></span>
+                              {isAutomationPaused(selectedPatient) ? 'Automation Paused' : 'Automation Active'}
+                            </button>
                             <button className="btn btn-ghost" title="Call"><Phone size={18} /></button>
                           </div>
                         </div>
